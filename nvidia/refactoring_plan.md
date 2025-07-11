@@ -7,6 +7,17 @@ The overall goal is to create a reusable and extensible system for training vari
 *   **Problem:** The current training process is likely initiated by scripts like `parameter_sweep.py`, which are specific to the text autoencoder.
 *   **Solution:** Create a single, unified training script (e.g., `train.py`) that can handle different model types and datasets. This script would take configuration files as input to specify the model, dataset, and training parameters.
 
+```mermaid
+graph TD
+    A[Start] --> B{Read Config};
+    B --> C[Load Dataset];
+    C --> D[Load Model];
+    D --> E[Load Kernels];
+    E --> F[Run Training Loop];
+    F --> G[Save Checkpoints];
+    G --> H[End];
+```
+
 **2. Introduce a Model Zoo and Base Model Class:**
 
 *   **Problem:** The `gpu_text_autoencoder.py` is a standalone model. A new image autoencoder would be another standalone model, leading to code duplication.
@@ -17,6 +28,29 @@ The overall goal is to create a reusable and extensible system for training vari
     *   Refactor `GpuTextAutoencoder` to inherit from `BaseModel`.
     *   New models like `ImageAutoencoder` would also inherit from `BaseModel`.
 
+```mermaid
+classDiagram
+    class BaseModel {
+        +__init__()
+        +forward()
+        +loss()
+        +get_optimizer()
+    }
+    class GpuTextAutoencoder {
+    }
+    class ImageAutoencoder {
+    }
+    class MultiModalEncoder {
+    }
+    class DiffusionModel {
+    }
+
+    BaseModel <|-- GpuTextAutoencoder
+    BaseModel <|-- ImageAutoencoder
+    BaseModel <|-- MultiModalEncoder
+    BaseModel <|-- DiffusionModel
+```
+
 **3. Abstract GPU Kernels:**
 
 *   **Problem:** The `matrix_kernels.py` are likely tightly coupled to the text autoencoder's architecture.
@@ -24,6 +58,16 @@ The overall goal is to create a reusable and extensible system for training vari
     *   Create a `kernels` directory with subdirectories for different kernel types (e.g., `matrix`, `convolution`, `attention`).
     *   Create a `KernelManager` that loads and provides the appropriate kernels based on the model's needs.
     *   The `BaseModel` will have a method to specify which kernels it requires.
+
+```mermaid
+graph TD
+    A[BaseModel] --> B{Request Kernels};
+    B --> C[KernelManager];
+    C --> D{Load Kernels};
+    D --> E[Matrix Kernels];
+    D --> F[Convolution Kernels];
+    D --> G[Attention Kernels];
+```
 
 **4. Implement a Flexible Data Loading Pipeline:**
 
@@ -33,6 +77,25 @@ The overall goal is to create a reusable and extensible system for training vari
     *   Implement a `BaseDataset` class that defines a common interface for all datasets (e.g., `__init__`, `__len__`, `__getitem__`).
     *   Create different dataset loaders for text, images, and multi-modal data, all inheriting from `BaseDataset`.
     *   The unified training script will use the appropriate dataset loader based on the configuration.
+
+```mermaid
+classDiagram
+    class BaseDataset {
+        +__init__()
+        +__len__()
+        +__getitem__()
+    }
+    class TextDataset {
+    }
+    class ImageDataset {
+    }
+    class MultiModalDataset {
+    }
+
+    BaseDataset <|-- TextDataset
+    BaseDataset <|-- ImageDataset
+    BaseDataset <|-- MultiModalDataset
+```
 
 **5. Use a Unified Configuration System:**
 
@@ -44,6 +107,16 @@ The overall goal is to create a reusable and extensible system for training vari
         *   `dataset_path`: Path to the training data.
         *   `training_params`: (e.g., learning rate, batch size, epochs)
         *   `model_params`: (e.g., layer sizes, activation functions)
+
+```mermaid
+graph TD
+    A[train.py] --> B{Reads};
+    B --> C[config.yaml];
+    C --> D[model_type];
+    C --> E[dataset_path];
+    C --> F[training_params];
+    C --> G[model_params];
+```
 
 **6. Refactor the Directory Structure:**
 
