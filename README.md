@@ -16,43 +16,46 @@ Diffy is currently a **color name autoencoder** that learns to associate color n
 ### Architecture
 
 ```mermaid
-graph TD
-    A["Color Names<br/>(264 colors)<br/>e.g. 'Absolute_Zero'"] --> B["Tokenizer<br/>Word → ID Mapping"]
-    B --> C["Random Vectors<br/>128D per color"]
+graph LR
+    A["264 Colors"] --> B["128D<br/>■■■■■■■■■■■■"]
 
-    C --> D["Input Layer<br/>128 dimensions"]
-    D --> E["Hidden Layer 1<br/>~110 dimensions"]
-    E --> F["Hidden Layer 2<br/>~83 dimensions"]
-    F --> G["Hidden Layer 3<br/>~70 dimensions"]
-    G --> H["BOTTLENECK<br/>56 dimensions<br/><strong>0.21D per color!</strong>"]
+    B --> C["110D<br/>■■■■■■■■■■"]
+    C --> D["83D<br/>■■■■■■■■"]
+    D --> E["70D<br/>■■■■■■■"]
+    E --> F["56D<br/>■■■■■<br/>🔥BOTTLENECK"]
 
-    H --> I["Hidden Layer 4<br/>~70 dimensions"]
-    I --> J["Hidden Layer 5<br/>~83 dimensions"]
-    J --> K["Hidden Layer 6<br/>~110 dimensions"]
-    K --> L["Output Layer<br/>128 dimensions"]
+    F --> G["70D<br/>■■■■■■■"]
+    G --> H["83D<br/>■■■■■■■■"]
+    H --> I["110D<br/>■■■■■■■■■■"]
+    I --> J["128D<br/>■■■■■■■■■■■■"]
 
-    L --> M["Reconstruction<br/>Should match input"]
-    M --> N["Best Match Search<br/>Cosine Similarity"]
-    N --> O["Predicted Color Name"]
+    J --> K["Color<br/>Prediction"]
 
-    subgraph "Encoder"
+    subgraph "ENCODER 🔽"
+        B
+        C
         D
         E
-        F
-        G
     end
 
-    subgraph "Decoder"
+    subgraph "DECODER 🔼"
+        G
+        H
         I
         J
-        K
-        L
     end
 
-    style H fill:#ff6b6b,stroke:#333,stroke-width:3px,color:#fff
     style A fill:#74c0fc,stroke:#333,stroke-width:2px
-    style O fill:#51cf66,stroke:#333,stroke-width:2px
-    style M fill:#ffd43b,stroke:#333,stroke-width:2px
+    style B fill:#339af0,stroke:#333,stroke-width:2px
+    style C fill:#339af0,stroke:#333,stroke-width:2px
+    style D fill:#339af0,stroke:#333,stroke-width:2px
+    style E fill:#339af0,stroke:#333,stroke-width:2px
+    style F fill:#ff6b6b,stroke:#333,stroke-width:4px,color:#fff
+    style G fill:#51cf66,stroke:#333,stroke-width:2px
+    style H fill:#51cf66,stroke:#333,stroke-width:2px
+    style I fill:#51cf66,stroke:#333,stroke-width:2px
+    style J fill:#51cf66,stroke:#333,stroke-width:2px
+    style K fill:#ffd43b,stroke:#333,stroke-width:2px
 ```
 
 **Key Architecture Details:**
