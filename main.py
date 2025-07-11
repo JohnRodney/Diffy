@@ -19,6 +19,7 @@ if __name__ == "__main__":
     parser.add_argument("-f", "--filename", type=str, help="The filename of the model to load.")
     parser.add_argument("-l", "--load_model", action="store_true", help="Load the model from the file.")
     parser.add_argument("-i", "--infer", action="store_true", help="Infer the model from the file.")
+    parser.add_argument("-c", "--checkpoint_dir", type=str, default="memorycapacityruns", help="Directory to save checkpoints (default: memorycapacityruns)")
     
     args = parser.parse_args()
     # Define your hyperparameters here
@@ -34,7 +35,10 @@ if __name__ == "__main__":
         "batch_size": 2,
         "grad_clip_norm": 0.01,   # Adjusted gradient clipping
         "leaky_relu_alpha": 0.01,
-        "quick_test_epochs": 100 # Run 100 epochs as a quick test before full training
+        "quick_test_epochs": 100, # Run 100 epochs as a quick test before full training
+        "checkpoint_interval": 500, # Save checkpoint every 500 epochs
+        "keep_last_n_checkpoints": 5, # Keep only last 5 checkpoints
+        "checkpoint_dir": args.checkpoint_dir # Use command line argument for checkpoint directory
     }
 
 

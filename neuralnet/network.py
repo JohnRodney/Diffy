@@ -3,6 +3,7 @@ import os
 import numpy as np
 import math
 import random
+import datetime
 
 from neuralnet.layer import Layer
 from tokenizer.tokenizer import Tokenizer
@@ -100,6 +101,60 @@ def save_model(network, filename="autoencoder_model.npz"):
     np.savez(filename, **model_params)
     print(f"Model saved to {filename}")
 
+def save_checkpoint(network, epoch, loss, accuracy, checkpoint_dir="memorycapacityruns", session_id=None):
+    """Save model checkpoint with training metadata"""
+    # Create checkpoint directory if it doesn't exist
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    # Create checkpoint filename with session ID, epoch and metrics
+    if session_id:
+        checkpoint_filename = f"{session_id}_epoch_{epoch:06d}_loss_{loss:.6f}_acc_{accuracy:.1f}.npz"
+    else:
+        checkpoint_filename = f"checkpoint_epoch_{epoch:06d}_loss_{loss:.6f}_acc_{accuracy:.1f}.npz"
+    checkpoint_path = os.path.join(checkpoint_dir, checkpoint_filename)
+    
+    # Save model parameters plus training metadata
+    model_params = {}
+    for i, layer in enumerate(network.all_layers):
+        model_params[f"layer_{i}_weights"] = layer.weights
+        model_params[f"layer_{i}_biases"] = layer.biases
+    
+    # Add training metadata
+    model_params["epoch"] = epoch
+    model_params["loss"] = loss
+    model_params["accuracy"] = accuracy
+    
+    np.savez(checkpoint_path, **model_params)
+    print(f"Checkpoint saved: {checkpoint_path}")
+    return checkpoint_path
+
+def cleanup_old_checkpoints(checkpoint_dir="memorycapacityruns", keep_last_n=5, session_id=None):
+    """Remove old checkpoints, keeping only the last N for the current session"""
+    if not os.path.exists(checkpoint_dir):
+        return
+    
+    # Get checkpoint files for this session
+    if session_id:
+        checkpoint_files = [f for f in os.listdir(checkpoint_dir) if f.startswith(f"{session_id}_epoch_") and f.endswith(".npz")]
+    else:
+        checkpoint_files = [f for f in os.listdir(checkpoint_dir) if f.startswith("checkpoint_epoch_") and f.endswith(".npz")]
+    
+    if len(checkpoint_files) <= keep_last_n:
+        return
+    
+    # Sort by epoch number (extracted from filename)
+    checkpoint_files.sort(key=lambda x: int(x.split("_epoch_")[1].split("_")[0]))
+    
+    # Remove oldest files
+    files_to_remove = checkpoint_files[:-keep_last_n]
+    for filename in files_to_remove:
+        file_path = os.path.join(checkpoint_dir, filename)
+        try:
+            os.remove(file_path)
+            print(f"Removed old checkpoint: {filename}")
+        except OSError as e:
+            print(f"Error removing {filename}: {e}")
+
 def load_model(network, filename="autoencoder_model.npz"):
     if not os.path.exists(filename):
         print(f"Error: Model file '{filename}' not found.")
@@ -133,7 +188,10 @@ def run_training(
     grad_clip_norm,
     leaky_relu_alpha,
     quick_test_epochs=0, # New parameter for quick testing
-    should_load_model=False
+    should_load_model=False,
+    checkpoint_interval=500, # Save checkpoint every N epochs
+    keep_last_n_checkpoints=5, # Keep only last N checkpoints to save disk space
+    checkpoint_dir="memorycapacityruns" # Directory to save checkpoints
 ):
     tokenizer = Tokenizer(2)
     tokenizer.fill_dictionary(words)
@@ -143,6 +201,10 @@ def run_training(
 
     # Initialize the network
     network = Network(vector_length, hidden_layer_count, bottleneck_size, alpha=leaky_relu_alpha)
+    
+    # Generate unique session ID based on timestamp
+    session_id = datetime.datetime.now().strftime("run_%Y%m%d_%H%M%S")
+    print(f"Training session ID: {session_id}")
     
     model_filename = "my_autoencoder_model.npz"
 
@@ -244,6 +306,37 @@ def run_training(
             print(f"\n--- Reconstruction Test at Epoch {epoch+1} ---")
             print_reconstruction_compact(words, vector_dictionary, network, tokenizer, word_show_counts, epoch)
             print("-" * 80)
+
+        # Save checkpoint at specified intervals
+        if (epoch + 1) % checkpoint_interval == 0:
+            # Calculate current accuracy for checkpoint
+            correct_count = 0
+            for word_to_test in words:
+                input_vec = vector_dictionary[word_to_test]
+                reconstructed_output = network.forward(input_vec)
+                
+                if not (np.any(np.isnan(reconstructed_output)) or np.any(np.isinf(reconstructed_output))):
+                    best_match = None
+                    best_match_similarity = -2.0
+                    for word_in_vocab, vec_in_vocab_idx in tokenizer.vocab.items():
+                        vec_in_vocab = vector_dictionary[list(tokenizer.vocab.keys())[list(tokenizer.vocab.values()).index(vec_in_vocab_idx)]]
+                        
+                        dot_product = np.dot(reconstructed_output.flatten(), vec_in_vocab.flatten())
+                        magnitude_result = np.linalg.norm(reconstructed_output.flatten())
+                        magnitude_word = np.linalg.norm(vec_in_vocab.flatten())
+                        
+                        if magnitude_result != 0 and magnitude_word != 0:
+                            cosine_similarity = dot_product / (magnitude_result * magnitude_word)
+                            if cosine_similarity > best_match_similarity:
+                                best_match_similarity = cosine_similarity
+                                best_match = word_in_vocab
+                    
+                    if best_match == word_to_test:
+                        correct_count += 1
+            
+            accuracy = (correct_count / len(words)) * 100
+            save_checkpoint(network, epoch + 1, avg_epoch_loss, accuracy, checkpoint_dir, session_id)
+            cleanup_old_checkpoints(checkpoint_dir=checkpoint_dir, keep_last_n=keep_last_n_checkpoints, session_id=session_id)
 
         if avg_epoch_loss < 1e-8:
             print(f"\nConverged at Epoch {epoch+1}")

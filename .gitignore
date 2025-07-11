@@ -65,6 +65,7 @@ data/
 logs/
 models/
 checkpoints/
+memorycapacityruns/
 
 # OS
 .DS_Store
