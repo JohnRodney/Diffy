@@ -187,7 +187,11 @@ def run_training(
                 # No backward pass during quick test, just observe forward loss
             
             avg_epoch_loss = total_epoch_loss / len(training_data_pairs)
-            print(f"Quick Test Epoch {epoch+1}, Average Loss: {avg_epoch_loss:.20f}")
+            
+            # Only print every 10 epochs during quick test
+            if (epoch + 1) % 10 == 0:
+                print(f"Quick Test Epoch {epoch+1}, Average Loss: {avg_epoch_loss:.8f}")
+            
             if np.isnan(avg_epoch_loss) or avg_epoch_loss > 1e10: # Check for early explosion in test
                 print("Quick test indicates instability (NaN/inf loss). Adjust parameters before full training.")
                 return # Exit if quick test fails
@@ -230,14 +234,16 @@ def run_training(
                 break
 
         avg_epoch_loss = total_epoch_loss / len(training_data_pairs)
-        print(f"Epoch {epoch+1}, Average Loss: {avg_epoch_loss:.20f}")
-
+        
         if np.isnan(avg_epoch_loss):
             print(f"Training stopped due to NaN loss at Epoch {epoch+1}. Consider restarting with smaller learning rate or more aggressive clipping.")
             break
 
-        print_reconstruction(words, vector_dictionary, network, tokenizer, word_show_counts)
-        print("-" * 50)
+        # Print full reconstruction every 50 epochs
+        if (epoch + 1) % 50 == 0:
+            print(f"\n--- Reconstruction Test at Epoch {epoch+1} ---")
+            print_reconstruction_compact(words, vector_dictionary, network, tokenizer, word_show_counts, epoch)
+            print("-" * 80)
 
         if avg_epoch_loss < 1e-8:
             print(f"\nConverged at Epoch {epoch+1}")
@@ -246,14 +252,17 @@ def run_training(
     save_model(network, model_filename)
 
     print("\n--- Training Complete. Testing Reconstruction ---")
-    print_reconstruction(words, vector_dictionary, network, tokenizer, word_show_counts)
+    print_reconstruction_compact(words, vector_dictionary, network, tokenizer, word_show_counts, epoch)
 
 
-def print_reconstruction(words, vector_dictionary, network, tokenizer, word_show_counts):
+def print_reconstruction_compact(words, vector_dictionary, network, tokenizer, word_show_counts, epoch):
+    """Compact version showing all color reconstructions in a readable format"""
+    correct_count = 0
+    results = []
+    
     for word_to_test in words:
         input_vec = vector_dictionary[word_to_test]
-        
-        reconstructed_output = network.forward(input_vec) # Use network.forward here
+        reconstructed_output = network.forward(input_vec)
         
         if np.any(np.isnan(reconstructed_output)) or np.any(np.isinf(reconstructed_output)):
             best_match = "NaN/Inf"
@@ -280,6 +289,21 @@ def print_reconstruction(words, vector_dictionary, network, tokenizer, word_show
             
             reconstruction_error = np.mean((vector_dictionary[word_to_test] - reconstructed_output)**2)
         
-        sys.stdout.write(f"\rInput Word: '{word_to_test}', Reconstructed as: '{best_match}', Similarity: {best_match_similarity:.4f}, Error: {reconstruction_error:.20f}, Shown Count: {word_show_counts[word_to_test]}")
-        sys.stdout.flush()
+        # Track correct reconstructions
+        if best_match == word_to_test:
+            correct_count += 1
+            
+        results.append(f"{word_to_test} → {best_match}")
+    
+    # Print summary
+    accuracy = (correct_count / len(words)) * 100
+    print(f"Accuracy: {correct_count}/{len(words)} ({accuracy:.1f}%)")
+    
+    # Print results in columns
+    print("\nReconstruction Results:")
+    for i in range(0, len(results), 4):  # 4 columns
+        row = results[i:i+4]
+        print("  ".join(f"{r:<20}" for r in row))
+    
+    print(f"\nCorrect: {correct_count}, Confused: {len(words) - correct_count} epochs: {epoch}")
 

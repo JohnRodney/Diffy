@@ -69,3 +69,11 @@ checkpoints/
 # OS
 .DS_Store
 Thumbs.db
+
+webpack.config.js
+web_server.py
+visualize.py
+train_vae.py
+templates/
+static/
+src/
