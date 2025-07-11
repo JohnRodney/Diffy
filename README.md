@@ -57,6 +57,7 @@ graph LR
     style J fill:#51cf66,stroke:#333,stroke-width:2px
     style K fill:#ffd43b,stroke:#333,stroke-width:2px
 ```
+<img width="791" height="596" alt="image" src="https://github.com/user-attachments/assets/0d5259c6-182d-458d-8b1c-7135bc9ace1b" />
 
 **Key Architecture Details:**
 
