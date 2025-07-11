@@ -17,28 +17,28 @@ Diffy is currently a **color name autoencoder** that learns to associate color n
 
 ```mermaid
 graph LR
-    A["264 Colors"] --> B["128D<br/>■■■■■■■■■■■■"]
+    A["264<br/>Colors"] --> B["128D<br/>██<br/>██<br/>██<br/>██"]
 
-    B --> C["110D<br/>■■■■■■■■■■"]
-    C --> D["83D<br/>■■■■■■■■"]
-    D --> E["70D<br/>■■■■■■■"]
-    E --> F["56D<br/>■■■■■<br/>🔥BOTTLENECK"]
+    B --> C["110D<br/>██<br/>██<br/>█"]
+    C --> D["83D<br/>██<br/>█"]
+    D --> E["70D<br/>█<br/>█"]
+    E --> F["56D<br/>█<br/>🔥"]
 
-    F --> G["70D<br/>■■■■■■■"]
-    G --> H["83D<br/>■■■■■■■■"]
-    H --> I["110D<br/>■■■■■■■■■■"]
-    I --> J["128D<br/>■■■■■■■■■■■■"]
+    F --> G["70D<br/>█<br/>█"]
+    G --> H["83D<br/>██<br/>█"]
+    H --> I["110D<br/>██<br/>██<br/>█"]
+    I --> J["128D<br/>██<br/>██<br/>██<br/>██"]
 
-    J --> K["Color<br/>Prediction"]
+    J --> K["Color<br/>Match"]
 
-    subgraph "ENCODER 🔽"
+    subgraph "ENCODER🔽"
         B
         C
         D
         E
     end
 
-    subgraph "DECODER 🔼"
+    subgraph "DECODER🔼"
         G
         H
         I
