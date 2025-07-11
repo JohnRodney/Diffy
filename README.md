@@ -15,10 +15,54 @@ Diffy is currently a **color name autoencoder** that learns to associate color n
 
 ### Architecture
 
+```mermaid
+graph TD
+    A["Color Names<br/>(264 colors)<br/>e.g. 'Absolute_Zero'"] --> B["Tokenizer<br/>Word → ID Mapping"]
+    B --> C["Random Vectors<br/>128D per color"]
+
+    C --> D["Input Layer<br/>128 dimensions"]
+    D --> E["Hidden Layer 1<br/>~110 dimensions"]
+    E --> F["Hidden Layer 2<br/>~83 dimensions"]
+    F --> G["Hidden Layer 3<br/>~70 dimensions"]
+    G --> H["BOTTLENECK<br/>56 dimensions<br/><strong>0.21D per color!</strong>"]
+
+    H --> I["Hidden Layer 4<br/>~70 dimensions"]
+    I --> J["Hidden Layer 5<br/>~83 dimensions"]
+    J --> K["Hidden Layer 6<br/>~110 dimensions"]
+    K --> L["Output Layer<br/>128 dimensions"]
+
+    L --> M["Reconstruction<br/>Should match input"]
+    M --> N["Best Match Search<br/>Cosine Similarity"]
+    N --> O["Predicted Color Name"]
+
+    subgraph "Encoder"
+        D
+        E
+        F
+        G
+    end
+
+    subgraph "Decoder"
+        I
+        J
+        K
+        L
+    end
+
+    style H fill:#ff6b6b,stroke:#333,stroke-width:3px,color:#fff
+    style A fill:#74c0fc,stroke:#333,stroke-width:2px
+    style O fill:#51cf66,stroke:#333,stroke-width:2px
+    style M fill:#ffd43b,stroke:#333,stroke-width:2px
+```
+
+**Key Architecture Details:**
+
 - **Input**: Color names (264 colors from Wikipedia)
 - **Encoder**: 128D → 3 hidden layers → 56D bottleneck
 - **Decoder**: 56D → 3 hidden layers → 128D reconstruction
 - **Challenge**: 0.21 dimensions per color in the bottleneck (testing memorization limits!)
+- **Activation**: Leaky ReLU (α=0.01) throughout
+- **Loss**: Mean Squared Error (MSE)
 
 ## Quick Start
 
