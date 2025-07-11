@@ -4,12 +4,30 @@ import numpy as np
 import math
 import random
 import datetime
-import json
 
 from neuralnet.layer import Layer
+from neuralnet.text_autoencoder import TextAutoencoder, create_text_autoencoder
 from tokenizer.tokenizer import Tokenizer
+from utils.drift_analysis import calculate_vector_drift
+from utils.checkpoint_manager import save_checkpoint
+from utils.model_persistence import save_model, load_model
 
-class Network:
+# Backward compatibility wrapper
+class Network(TextAutoencoder):
+    """Backward compatibility wrapper for the old Network class"""
+    
+    def __init__(self, vector_length, hidden_layer_count, bottleneck_size, alpha=0.01):
+        config = {
+            'vector_length': vector_length,
+            'hidden_layer_count': hidden_layer_count,
+            'bottleneck_size': bottleneck_size,
+            'activation_type': 'leaky_relu',
+            'activation_alpha': alpha
+        }
+        super().__init__(config)
+
+# Keep the old Network class structure but use the new architecture internally
+class LegacyNetwork:
     def __init__(self, vector_length, hidden_layer_count, bottleneck_size, alpha=0.01):
         self.vector_length = vector_length
         self.hidden_layer_count = hidden_layer_count
@@ -94,181 +112,7 @@ class Network:
 
 
 
-def save_model(network, filename="autoencoder_model.npz"):
-    model_params = {}
-    for i, layer in enumerate(network.all_layers):
-        model_params[f"layer_{i}_weights"] = layer.weights
-        model_params[f"layer_{i}_biases"] = layer.biases
-    np.savez(filename, **model_params)
-    print(f"Model saved to {filename}")
-
-def save_checkpoint_metadata(checkpoint_path, epoch, loss, accuracy, session_id, training_params, start_time=None, elapsed_time=None):
-    """Save training metadata to JSON file alongside model checkpoint"""
-    json_filename = checkpoint_path.replace('.npz', '.json')
-    
-    metadata = {
-        "session_info": {
-            "session_id": session_id,
-            "start_time": start_time.isoformat() if start_time else None,
-            "elapsed_time_seconds": elapsed_time,
-            "checkpoint_time": datetime.datetime.now().isoformat()
-        },
-        "model_architecture": {
-            "vector_length": training_params["vector_length"],
-            "hidden_layer_count": training_params["hidden_layer_count"],
-            "bottleneck_size": training_params["bottleneck_size"],
-            "leaky_relu_alpha": training_params["leaky_relu_alpha"],
-            "total_colors": len(training_params["words"])
-        },
-        "training_hyperparameters": {
-            "learning_rate": training_params["learning_rate"],
-            "batch_size": training_params["batch_size"],
-            "grad_clip_norm": training_params["grad_clip_norm"],
-            "checkpoint_interval": training_params["checkpoint_interval"],
-            "target_epochs": training_params["num_epochs"]
-        },
-        "training_progress": {
-            "current_epoch": epoch,
-            "loss": float(loss),
-            "accuracy_percent": float(accuracy),
-            "colors_learned": int(accuracy * len(training_params["words"]) / 100),
-            "colors_total": len(training_params["words"])
-        },
-        "checkpoint_info": {
-            "model_file": os.path.basename(checkpoint_path),
-            "file_size_mb": os.path.getsize(checkpoint_path) / (1024 * 1024) if os.path.exists(checkpoint_path) else 0
-        }
-    }
-    
-    with open(json_filename, 'w') as f:
-        json.dump(metadata, f, indent=2)
-    
-    print(f"Metadata saved: {json_filename}")
-    return json_filename
-
-def save_checkpoint(network, epoch, loss, accuracy, checkpoint_dir="memorycapacityruns", session_id=None, training_params=None, start_time=None, elapsed_time=None):
-    """Save model checkpoint with training metadata"""
-    # Create checkpoint directory if it doesn't exist
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    
-    # Create checkpoint filename with session ID, epoch and metrics
-    if session_id:
-        checkpoint_filename = f"{session_id}_epoch_{epoch:06d}_loss_{loss:.6f}_acc_{accuracy:.1f}.npz"
-    else:
-        checkpoint_filename = f"checkpoint_epoch_{epoch:06d}_loss_{loss:.6f}_acc_{accuracy:.1f}.npz"
-    checkpoint_path = os.path.join(checkpoint_dir, checkpoint_filename)
-    
-    # Save model parameters plus training metadata
-    model_params = {}
-    for i, layer in enumerate(network.all_layers):
-        model_params[f"layer_{i}_weights"] = layer.weights
-        model_params[f"layer_{i}_biases"] = layer.biases
-    
-    # Add training metadata
-    model_params["epoch"] = epoch
-    model_params["loss"] = loss
-    model_params["accuracy"] = accuracy
-    
-    np.savez(checkpoint_path, **model_params)
-    print(f"Checkpoint saved: {checkpoint_path}")
-    
-    # Save JSON metadata if training parameters provided
-    if training_params:
-        save_checkpoint_metadata(checkpoint_path, epoch, loss, accuracy, session_id, training_params, start_time, elapsed_time)
-    
-    return checkpoint_path
-
-def cleanup_old_checkpoints(checkpoint_dir="memorycapacityruns", keep_last_n=5, session_id=None):
-    """Remove old checkpoints, keeping only the last N for the current session"""
-    if not os.path.exists(checkpoint_dir):
-        return
-    
-    # Get checkpoint files for this session
-    if session_id:
-        checkpoint_files = [f for f in os.listdir(checkpoint_dir) if f.startswith(f"{session_id}_epoch_") and f.endswith(".npz")]
-    else:
-        checkpoint_files = [f for f in os.listdir(checkpoint_dir) if f.startswith("checkpoint_epoch_") and f.endswith(".npz")]
-    
-    if len(checkpoint_files) <= keep_last_n:
-        return
-    
-    # Sort by epoch number (extracted from filename)
-    checkpoint_files.sort(key=lambda x: int(x.split("_epoch_")[1].split("_")[0]))
-    
-    # Remove oldest files (both .npz and .json)
-    files_to_remove = checkpoint_files[:-keep_last_n]
-    for filename in files_to_remove:
-        # Remove .npz file
-        npz_path = os.path.join(checkpoint_dir, filename)
-        try:
-            os.remove(npz_path)
-            print(f"Removed old checkpoint: {filename}")
-        except OSError as e:
-            print(f"Error removing {filename}: {e}")
-        
-        # Remove corresponding .json file
-        json_filename = filename.replace('.npz', '.json')
-        json_path = os.path.join(checkpoint_dir, json_filename)
-        try:
-            if os.path.exists(json_path):
-                os.remove(json_path)
-                print(f"Removed old metadata: {json_filename}")
-        except OSError as e:
-            print(f"Error removing {json_filename}: {e}")
-
-def load_training_progression(checkpoint_dir="memorycapacityruns", session_id=None):
-    """Load training progression from JSON metadata files"""
-    if not os.path.exists(checkpoint_dir):
-        print(f"Checkpoint directory '{checkpoint_dir}' not found.")
-        return []
-    
-    # Get all JSON metadata files for this session
-    if session_id:
-        json_files = [f for f in os.listdir(checkpoint_dir) if f.startswith(f"{session_id}_epoch_") and f.endswith(".json")]
-    else:
-        json_files = [f for f in os.listdir(checkpoint_dir) if f.startswith("checkpoint_epoch_") and f.endswith(".json")]
-    
-    if not json_files:
-        print(f"No training metadata found for session: {session_id}")
-        return []
-    
-    # Sort by epoch number
-    json_files.sort(key=lambda x: int(x.split("_epoch_")[1].split("_")[0]))
-    
-    progression = []
-    for filename in json_files:
-        filepath = os.path.join(checkpoint_dir, filename)
-        try:
-            with open(filepath, 'r') as f:
-                metadata = json.load(f)
-                progression.append({
-                    'epoch': metadata['training_progress']['current_epoch'],
-                    'loss': metadata['training_progress']['loss'],
-                    'accuracy': metadata['training_progress']['accuracy_percent'],
-                    'colors_learned': metadata['training_progress']['colors_learned'],
-                    'elapsed_time': metadata['session_info']['elapsed_time_seconds']
-                })
-        except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
-            print(f"Error reading {filename}: {e}")
-    
-    return progression
-
-def load_model(network, filename="autoencoder_model.npz"):
-    if not os.path.exists(filename):
-        print(f"Error: Model file '{filename}' not found.")
-        return False
-    loaded_params = np.load(filename)
-    for i, layer in enumerate(network.all_layers):
-        weight_key = f"layer_{i}_weights"
-        bias_key = f"layer_{i}_biases"
-        if weight_key in loaded_params and bias_key in loaded_params:
-            layer.weights = loaded_params[weight_key]
-            layer.biases = loaded_params[bias_key]
-        else:
-            print(f"Warning: Parameters for layer {i} not found in {filename}. Skipping.")
-            return False
-    print(f"Model loaded from {filename}")
-    return True
+# Removed duplicate functions - now using utilities from utils/ directory
 
 def get_batches(data, batch_size):
     random.shuffle(data)
@@ -288,7 +132,6 @@ def run_training(
     quick_test_epochs=0, # New parameter for quick testing
     should_load_model=False,
     checkpoint_interval=500, # Save checkpoint every N epochs
-    keep_last_n_checkpoints=5, # Keep only last N checkpoints to save disk space
     checkpoint_dir="memorycapacityruns" # Directory to save checkpoints
 ):
     tokenizer = Tokenizer(2)
@@ -337,9 +180,16 @@ def run_training(
 
     training_data_pairs = [(vector_dictionary[word], vector_dictionary[word]) for word in words]
     
+    # Save initial vectors for drift analysis
+    initial_vectors = {}
+    for word in words:
+        initial_vectors[word] = vector_dictionary[word].copy()
+    
     word_show_counts = {word: 0 for word in words}
 
     print("Starting training...")
+    print(f"Initial vectors saved for drift analysis ({len(initial_vectors)} colors)")
+
 
     # --- Quick Test Phase ---
     if quick_test_epochs > 0:
@@ -450,8 +300,11 @@ def run_training(
             
             accuracy = (correct_count / len(words)) * 100
             elapsed_time = (datetime.datetime.now() - start_time).total_seconds()
-            save_checkpoint(network, epoch + 1, avg_epoch_loss, accuracy, checkpoint_dir, session_id, training_params, start_time, elapsed_time)
-            cleanup_old_checkpoints(checkpoint_dir=checkpoint_dir, keep_last_n=keep_last_n_checkpoints, session_id=session_id)
+            
+            # Calculate vector drift data
+            drift_data = calculate_vector_drift(network, words, vector_dictionary, initial_vectors, tokenizer)
+            
+            save_checkpoint(network, epoch + 1, avg_epoch_loss, accuracy, checkpoint_dir, session_id, training_params, start_time, elapsed_time, drift_data)
 
         if avg_epoch_loss < 1e-8:
             print(f"\nConverged at Epoch {epoch+1}")

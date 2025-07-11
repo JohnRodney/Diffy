@@ -1,0 +1,33 @@
+{
+  "session_info": {
+    "session_id": "run_20250710_220804",
+    "start_time": "2025-07-10T22:08:04.920787",
+    "elapsed_time_seconds": 1268.031747,
+    "checkpoint_time": "2025-07-10T22:29:12.965519"
+  },
+  "model_architecture": {
+    "vector_length": 128,
+    "hidden_layer_count": 3,
+    "bottleneck_size": 56,
+    "leaky_relu_alpha": 0.01,
+    "total_colors": 264
+  },
+  "training_hyperparameters": {
+    "learning_rate": 1e-05,
+    "batch_size": 2,
+    "grad_clip_norm": 0.01,
+    "checkpoint_interval": 500,
+    "target_epochs": 10000
+  },
+  "training_progress": {
+    "current_epoch": 7000,
+    "loss": 0.04234568931130503,
+    "accuracy_percent": 3.0303030303030303,
+    "colors_learned": 8,
+    "colors_total": 264
+  },
+  "checkpoint_info": {
+    "model_file": "run_20250710_220804_epoch_007000_loss_0.042346_acc_3.0.npz",
+    "file_size_mb": 0.6841754913330078
+  }
+}
