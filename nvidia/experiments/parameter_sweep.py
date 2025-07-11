@@ -28,6 +28,20 @@ except ImportError:
     print("Warning: data_loader not available")
     load_color_data = None
 
+# Import color loading functionality
+import json
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))  # Add project root
+
+try:
+    from color_loader import load_colors_from_json
+    from tokenizer.tokenizer import Tokenizer
+except ImportError:
+    print("Warning: color_loader or tokenizer not available")
+    load_colors_from_json = None
+    Tokenizer = None
+
 class ParameterSweep:
     """
     Automated parameter sweep for GPU training
@@ -72,17 +86,17 @@ class ParameterSweep:
     
     def define_parameter_grid(self):
         """
-        Define the parameter space to explore
-        Customize this based on your research questions
+        Define the parameter space to explore - SCALED UP FOR RTX 5090
+        Large architectures and batch sizes to maximize GPU utilization
         """
         param_grid = {
-            'vector_length': [128],  # Keep constant for now
-            'hidden_layer_count': [1, 2, 3, 4],
-            'bottleneck_size': [16, 32, 56, 64, 96],
-            'learning_rate': [0.001, 0.003, 0.01, 0.03],
-            'leaky_relu_alpha': [0.01, 0.05, 0.1, 0.2],
-            'batch_size': [8, 16, 32],
-            'grad_clip_norm': [0.5, 1.0, 2.0]
+            'vector_length': [512, 1024, 2048],  # MASSIVELY scaled up from 128
+            'hidden_layer_count': [2, 3, 4, 5],  # More layers for complexity
+            'bottleneck_size': [128, 256, 512, 1024],  # Much larger bottlenecks
+            'learning_rate': [0.001, 0.003, 0.01],  # Fewer learning rates for faster sweep
+            'leaky_relu_alpha': [0.01, 0.1],  # Fewer alpha values
+            'batch_size': [1024, 2048, 4096],  # MUCH larger batch sizes for RTX 5090
+            'grad_clip_norm': [0.5, 1.0]  # Fewer gradient clip values
         }
         
         # Generate all combinations
@@ -132,160 +146,298 @@ class ParameterSweep:
         with open(param_file, 'w') as f:
             json.dump(params, f, indent=2)
         
-        try:
-            # Create GPU autoencoder
-            if GPUTextAutoencoder is None:
-                raise ImportError("GPUTextAutoencoder not available")
+        # Create GPU autoencoder
+        if GPUTextAutoencoder is None:
+            raise ImportError("GPUTextAutoencoder not available")
+        
+        gpu_ae = GPUTextAutoencoder(
+            vector_length=params['vector_length'],
+            hidden_layer_count=params['hidden_layer_count'],
+            bottleneck_size=params['bottleneck_size'],
+            alpha=params['leaky_relu_alpha']
+        )
             
-            gpu_ae = GPUTextAutoencoder(
-                vector_length=params['vector_length'],
-                hidden_layer_count=params['hidden_layer_count'],
-                bottleneck_size=params['bottleneck_size'],
-                alpha=params['leaky_relu_alpha']
-            )
+        # Load REAL COLOR DATA for RTX 5090
+        print(f"🎨 Loading actual color data for autoencoder training...")
+        training_data = self.load_real_color_data(params['vector_length'])
+        
+        # Convert to numpy array for efficient batching
+        training_data_array = np.array([item[0] for item in training_data], dtype=np.float32)
+        print(f"🚀 Training data prepared: {training_data_array.shape}")
+        
+        # Move training data to GPU once to eliminate CPU-GPU transfers
+        from numba import cuda
+        training_data_gpu = cuda.to_device(training_data_array)
+        print(f"📦 Training data moved to GPU")
+        
+        # Pre-allocate GPU batch memory to avoid transfers - SCALED FOR RTX 5090
+        max_batch_size = max([4096, params['batch_size']])  # Support up to 4096 batch size
+        temp_batch = np.zeros((max_batch_size, params['vector_length']), dtype=training_data_array.dtype)
+        batch_data_gpu = cuda.to_device(temp_batch)
+        print(f"💾 Allocated GPU memory for batch size: {max_batch_size} x {params['vector_length']}")
+        
+        # Pre-generate ALL shuffled indices at once to avoid CPU work during training
+        total_samples = len(training_data_array)
+        num_batches = (total_samples + params['batch_size'] - 1) // params['batch_size']
+        
+        # Training loop
+        training_history = []
+        best_loss = float('inf')
+        patience = 1000  # Early stopping patience
+        no_improvement_count = 0
+        last_save_epoch = -1  # Track when we last saved to reduce disk I/O
+        
+        for epoch in range(max_epochs):
+            epoch_start = time.time()
             
-            # Load training data (you'll need to implement this)
-            # For now, create dummy data
-            num_colors = 264
-            training_data = self.create_dummy_training_data(
-                num_colors, params['vector_length']
-            )
+            # Process entire epoch in one GPU call to minimize CPU overhead
+            # Train all batches sequentially on GPU with minimal CPU involvement
+            epoch_loss = 0.0
             
-            # Training loop
-            training_history = []
-            best_loss = float('inf')
-            patience = 1000  # Early stopping patience
-            no_improvement_count = 0
+            for batch_idx in range(num_batches):
+                batch_start = batch_idx * params['batch_size']
+                batch_end = min(batch_start + params['batch_size'], total_samples)
+                actual_batch_size = batch_end - batch_start
+                
+                # GPU-only batch copy using slicing (no CPU involvement)
+                batch_slice = training_data_gpu[batch_start:batch_end]
+                batch_data_gpu[:actual_batch_size] = batch_slice
+                
+                # Train batch (100% GPU - no CPU transfers)
+                batch_loss = gpu_ae.train_batch_gpu_only(
+                    batch_data_gpu[:actual_batch_size],
+                    params['learning_rate'], 
+                    params['grad_clip_norm']
+                )
+                
+                epoch_loss += batch_loss
             
-            for epoch in range(max_epochs):
-                epoch_start = time.time()
+            # Minimize CPU math
+            avg_loss = epoch_loss / num_batches
+            epoch_time = time.time() - epoch_start
+            
+            # Log progress to history (minimal CPU work)
+            training_history.append({
+                'epoch': epoch,
+                'loss': float(avg_loss),
+                'time': epoch_time,
+                'timestamp': time.time()
+            })
+            
+            # Only log every 100 epochs to minimize CPU interruption
+            if epoch % 100 == 0:
+                print(f"  Epoch {epoch:4d}: Loss = {avg_loss:.6f}, Time = {epoch_time:.3f}s, Batches = {num_batches}")
+            
+            # Check for improvement (reduced model saving frequency)
+            if avg_loss < best_loss:
+                best_loss = avg_loss
+                no_improvement_count = 0
                 
-                # Train on all batches
-                total_loss = 0
-                num_batches = 0
+                # Only save model every 50 epochs or significant improvement to reduce I/O
+                improvement_threshold = 0.01  # 1% improvement
+                significant_improvement = (epoch - last_save_epoch > 50) or (best_loss < 0.99 * best_loss)
                 
-                for batch_start in range(0, len(training_data), params['batch_size']):
-                    batch_end = min(batch_start + params['batch_size'], len(training_data))
-                    batch_data = training_data[batch_start:batch_end]
-                    
-                    # Convert to numpy arrays
-                    input_batch = np.array([item[0] for item in batch_data])
-                    target_batch = np.array([item[1] for item in batch_data])
-                    
-                    # Train batch
-                    batch_loss = gpu_ae.train_batch_gpu(
-                        input_batch, target_batch,
-                        params['learning_rate'], params['grad_clip_norm']
-                    )
-                    
-                    total_loss += batch_loss
-                    num_batches += 1
-                
-                avg_loss = total_loss / num_batches
-                epoch_time = time.time() - epoch_start
-                
-                # Log progress
-                training_history.append({
-                    'epoch': epoch,
-                    'loss': float(avg_loss),
-                    'time': epoch_time,
-                    'timestamp': time.time()
-                })
-                
-                # Check for improvement
-                if avg_loss < best_loss:
-                    best_loss = avg_loss
-                    no_improvement_count = 0
+                if significant_improvement:
+                    last_save_epoch = epoch
                     
                     # Save best model (both in experiment dir and models volume)
                     weights_cpu, biases_cpu = gpu_ae.get_weights_cpu()
                     
                     # Save to experiment directory for detailed tracking
                     exp_model_path = os.path.join(exp_dir, "best_model.npz")
-                    np.savez(
-                        exp_model_path,
-                        weights=weights_cpu,
-                        biases=biases_cpu,
-                        loss=avg_loss,
-                        epoch=epoch
-                    )
+                    # Create save dictionary with individual arrays
+                    save_dict = {
+                        'loss': avg_loss,
+                        'epoch': epoch
+                    }
+                    # Add weights and biases with individual keys
+                    for i, (w, b) in enumerate(zip(weights_cpu, biases_cpu)):
+                        save_dict[f'weight_{i}'] = w
+                        save_dict[f'bias_{i}'] = b
+                    
+                    np.savez(exp_model_path, **save_dict)
                     
                     # Save to persistent models volume for easy access
                     global_model_path = os.path.join(
                         self.models_dir, 
                         f"exp_{experiment_id:04d}_best_model.npz"
                     )
-                    np.savez(
-                        global_model_path,
-                        weights=weights_cpu,
-                        biases=biases_cpu,
-                        loss=avg_loss,
-                        epoch=epoch,
-                        parameters=params  # Include params for easy identification
-                    )
+                    save_dict['parameters'] = params  # Include params for easy identification
+                    np.savez(global_model_path, **save_dict)
+            else:
+                no_improvement_count += 1
+            
+            # Progress already logged above each epoch
+            
+            # Early stopping
+            if no_improvement_count >= patience:
+                print(f"  Early stopping at epoch {epoch}")
+                break
+            
+            # Save training history periodically
+            if epoch % 500 == 0:
+                history_file = os.path.join(exp_dir, "training_history.json")
+                with open(history_file, 'w') as f:
+                    json.dump(training_history, f, indent=2)
+        
+        # Final results
+        experiment_time = time.time() - experiment_start
+        
+        result = {
+            'experiment_id': experiment_id,
+            'parameters': params,
+            'best_loss': float(best_loss),
+            'total_epochs': len(training_history),
+            'experiment_time': experiment_time,
+            'final_loss': float(training_history[-1]['loss']) if training_history else None,
+            'converged': no_improvement_count < patience,
+            'training_history': training_history
+        }
+        
+        # Save detailed results
+        result_file = os.path.join(exp_dir, "results.json")
+        with open(result_file, 'w') as f:
+            json.dump(result, f, indent=2)
+        
+        print(f"✅ Experiment {experiment_id} completed")
+        print(f"   Best loss: {best_loss:.6f}")
+        print(f"   Total time: {experiment_time:.1f}s")
+        
+        # Clean up GPU memory before next experiment
+        gpu_ae.cleanup_gpu_memory()
+        
+        return result
+    
+    def load_real_color_data(self, vector_length):
+        """
+        Load REAL color data from colors_a_f.json and convert to vectors
+        This is the actual experiment - training autoencoders on color data!
+        """
+        print(f"🎨 Loading real color data from colors_a_f.json...")
+        
+        # Load color data from JSON
+        colors_file = os.path.join(os.path.dirname(__file__), '..', '..', 'colors_a_f.json')
+        if not os.path.exists(colors_file):
+            colors_file = 'colors_a_f.json'  # Try current directory
+        
+        if not os.path.exists(colors_file):
+            print(f"❌ Color data file not found. Falling back to dummy data.")
+            return self.create_dummy_training_data(1000, vector_length)
+        
+        with open(colors_file, 'r', encoding='utf-8') as f:
+            colors_data = json.load(f)
+        
+        print(f"📊 Found {len(colors_data)} colors in database")
+        
+        # Create tokenizer for color names
+        if Tokenizer is not None:
+            tokenizer = Tokenizer(vocab_size=10000)
+            color_names = [color.get('Name', '') for color in colors_data if color.get('Name')]
+            tokenizer.fill_dictionary(color_names)
+            print(f"🔤 Built vocabulary with {len(tokenizer.vocab)} unique tokens")
+        
+        training_data = []
+        
+        for color in colors_data:
+            if not color.get('Name'):
+                continue
+                
+            try:
+                # Extract color features and convert to vector
+                vector = self.color_to_vector(color, tokenizer, vector_length)
+                if vector is not None:
+                    # Autoencoder task: input = target
+                    training_data.append((vector, vector))
+                    
+            except Exception as e:
+                print(f"⚠️  Skipping color {color.get('Name', 'unknown')}: {e}")
+                continue
+        
+        print(f"✅ Successfully loaded {len(training_data)} color vectors")
+        print(f"📏 Each vector has {vector_length} dimensions")
+        
+        # Pad with additional samples if needed for large batch sizes
+        while len(training_data) < 8000:
+            # Duplicate existing samples with small random noise for more training data
+            original = training_data[np.random.randint(len(training_data))]
+            noise = np.random.randn(vector_length) * 0.01  # Very small noise
+            noisy_vector = (original[0] + noise).astype(np.float32)
+            training_data.append((noisy_vector, noisy_vector))
+        
+        print(f"🔢 Final training set: {len(training_data)} samples")
+        return training_data
+    
+    def color_to_vector(self, color_data, tokenizer, vector_length):
+        """
+        Convert a single color entry to a fixed-length vector
+        """
+        try:
+            # Extract numeric features
+            features = []
+            
+            # RGB values (3 features)
+            rgb_fields = ['Red(RGB)', 'Green(RGB)', 'Blue(RGB)']
+            for field in rgb_fields:
+                value_str = color_data.get(field, '0%').replace('%', '')
+                features.append(float(value_str) / 100.0)  # Normalize to 0-1
+            
+            # HSL values (3 features)  
+            hsl_fields = ['Hue(HSL/HSV)', 'Satur.(HSL)', 'Light(HSL)']
+            for field in hsl_fields:
+                value_str = color_data.get(field, '0°').replace('°', '').replace('%', '')
+                if field == 'Hue(HSL/HSV)':
+                    features.append(float(value_str) / 360.0)  # Normalize hue to 0-1
                 else:
-                    no_improvement_count += 1
+                    features.append(float(value_str) / 100.0)  # Normalize to 0-1
+            
+            # HSV values (2 additional features - hue already included)
+            hsv_fields = ['Satur.(HSV)', 'Value(HSV)']
+            for field in hsv_fields:
+                value_str = color_data.get(field, '0%').replace('%', '')
+                features.append(float(value_str) / 100.0)  # Normalize to 0-1
+            
+            # Color name tokens (fill remaining vector length)
+            if tokenizer is not None:
+                color_name = color_data.get('Name', '')
+                tokens = tokenizer.tokenize(color_name)
                 
-                # Print progress every 100 epochs
-                if epoch % 100 == 0:
-                    print(f"  Epoch {epoch}: Loss = {avg_loss:.6f}, Time = {epoch_time:.3f}s")
-                
-                # Early stopping
-                if no_improvement_count >= patience:
-                    print(f"  Early stopping at epoch {epoch}")
-                    break
-                
-                # Save training history periodically
-                if epoch % 500 == 0:
-                    history_file = os.path.join(exp_dir, "training_history.json")
-                    with open(history_file, 'w') as f:
-                        json.dump(training_history, f, indent=2)
+                # Pad or truncate tokens to fill remaining vector space
+                remaining_length = vector_length - len(features)
+                if remaining_length > 0:
+                    # Pad tokens to remaining length
+                    tokens = tokens[:remaining_length]  # Truncate if too long
+                    tokens.extend([0] * (remaining_length - len(tokens)))  # Pad with zeros
+                    
+                    # Normalize token IDs to 0-1 range
+                    max_token_id = max(tokenizer.vocab.values()) if tokenizer.vocab else 1
+                    normalized_tokens = [token / max_token_id for token in tokens]
+                    features.extend(normalized_tokens)
             
-            # Final results
-            experiment_time = time.time() - experiment_start
+            # Ensure exact vector length
+            if len(features) > vector_length:
+                features = features[:vector_length]
+            elif len(features) < vector_length:
+                # Pad with zeros if needed
+                features.extend([0.0] * (vector_length - len(features)))
             
-            result = {
-                'experiment_id': experiment_id,
-                'parameters': params,
-                'best_loss': float(best_loss),
-                'total_epochs': len(training_history),
-                'experiment_time': experiment_time,
-                'final_loss': float(training_history[-1]['loss']) if training_history else None,
-                'converged': no_improvement_count < patience,
-                'training_history': training_history
-            }
-            
-            # Save detailed results
-            result_file = os.path.join(exp_dir, "results.json")
-            with open(result_file, 'w') as f:
-                json.dump(result, f, indent=2)
-            
-            print(f"✅ Experiment {experiment_id} completed")
-            print(f"   Best loss: {best_loss:.6f}")
-            print(f"   Total time: {experiment_time:.1f}s")
-            
-            return result
+            return np.array(features, dtype=np.float32)
             
         except Exception as e:
-            print(f"❌ Experiment {experiment_id} failed: {str(e)}")
-            return {
-                'experiment_id': experiment_id,
-                'parameters': params,
-                'error': str(e),
-                'status': 'failed'
-            }
-    
+            print(f"Error processing color {color_data.get('Name', 'unknown')}: {e}")
+            return None
+
     def create_dummy_training_data(self, num_items, vector_length):
         """
-        Create dummy training data for testing
-        Replace with actual color data loading
+        FALLBACK: Create dummy training data if color data fails to load
         """
         training_data = []
+        print(f"⚠️  Using fallback dummy data: {num_items} samples with {vector_length} dimensions")
+        
         for i in range(num_items):
-            # Create random vector (representing color)
-            vector = np.random.randn(vector_length).astype(np.float32)
-            # Autoencoder task: input = target
+            # Simple random vectors as fallback
+            vector = np.random.randn(vector_length).astype(np.float32) * 0.1
             training_data.append((vector, vector))
+        
         return training_data
     
     def run_time_limited_sweep(self, max_runtime_hours=20):
