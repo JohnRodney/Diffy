@@ -19,6 +19,7 @@ import numba
 TILE_DIM = 32
 BLOCK_ROWS = 8
 SHARED_MEMORY_PADDING = 1
+TILE_DIM_PADDED = TILE_DIM + SHARED_MEMORY_PADDING  # 33
 
 @cuda.jit
 def gpu_transpose(input_matrix, output_matrix):
@@ -29,11 +30,10 @@ def gpu_transpose(input_matrix, output_matrix):
         input_matrix: Input matrix (M, N)
         output_matrix: Output matrix (N, M) - must be pre-allocated
     """
-    tile = cuda.shared.array((TILE_DIM, TILE_DIM + SHARED_MEMORY_PADDING), dtype=numba.float32)
+    tile = cuda.shared.array((TILE_DIM, TILE_DIM_PADDED), dtype=numba.float32)
     
     x = cuda.blockIdx.x * TILE_DIM + cuda.threadIdx.x
     y = cuda.blockIdx.y * TILE_DIM + cuda.threadIdx.y
-    width = cuda.gridDim.x * TILE_DIM
     
     for j in range(0, TILE_DIM, BLOCK_ROWS):
         if (y + j) < input_matrix.shape[0] and x < input_matrix.shape[1]:

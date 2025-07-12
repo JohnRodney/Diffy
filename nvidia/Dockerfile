@@ -33,5 +33,4 @@ RUN mkdir -p /models
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD python -c "from numba import cuda; assert cuda.is_available(), 'CUDA not available'" || exit 1
 
-# Run smoke test to validate system works (single experiment, 1 epoch)
 CMD ["python", "experiments/parameter_sweep.py", "--smoke-test"]
