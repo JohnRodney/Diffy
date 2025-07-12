@@ -78,3 +78,10 @@ train_vae.py
 templates/
 static/
 src/
+
+run_baseline_56d/
+run_baseline_56d_a/
+examples/
+
+ignore/
+colors_a_f.json

@@ -1,0 +1,21 @@
+{
+  "typeCheckingMode": "basic",
+  "stubPath": "stubs",
+  "reportMissingModuleSource": false,
+  "reportMissingImports": "warning",
+  "reportMissingTypeStubs": false,
+  "reportUntypedFunctionDecorator": false,
+  "reportUnknownParameterType": false,
+  "reportUnknownMemberType": false,
+  "reportUnknownArgumentType": false,
+  "reportUnknownVariableType": false,
+  "reportGeneralTypeIssues": "warning",
+  "pythonVersion": "3.11",
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": ["stubs"],
+      "pythonVersion": "3.11"
+    }
+  ]
+}
