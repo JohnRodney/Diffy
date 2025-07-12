@@ -26,8 +26,8 @@ COPY . .
 # Set Python path
 ENV PYTHONPATH="/app:$PYTHONPATH"
 
-# Create results directory
-RUN mkdir -p /app/results
+# Create /models directory for all outputs (fixes root permission issue)
+RUN mkdir -p /models
 
 # Health check to verify RTX 5090 is detected
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \

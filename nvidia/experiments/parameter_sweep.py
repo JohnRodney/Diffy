@@ -66,25 +66,29 @@ class ParameterSweep:
     """
     
     def __init__(self, base_output_dir=None):
+        # Always save everything under /models/ to avoid multiple scp directories
         if base_output_dir is None:
-            if os.path.exists("/app/logs"):
-                self.base_output_dir = "/app/logs/parameter_sweeps"
-                self.models_dir = "/app/models" 
-                self.results_dir = "/app/generated_images"
+            if os.path.exists("/app"):
+                # Everything goes under /models/ for easy scp
+                self.base_output_dir = "/models/parameter_sweeps"
+                self.models_dir = "/models/trained_models" 
+                self.results_dir = "/models/generated_images"
             else:
-                self.base_output_dir = "sweep_results"
-                self.models_dir = "models"
-                self.results_dir = "results"
+                # Local development fallback
+                self.base_output_dir = "models/parameter_sweeps"
+                self.models_dir = "models/trained_models"
+                self.results_dir = "models/generated_images"
         else:
             self.base_output_dir = base_output_dir
-            self.models_dir = os.path.join(base_output_dir, "models")
-            self.results_dir = os.path.join(base_output_dir, "results")
+            self.models_dir = os.path.join(base_output_dir, "trained_models")
+            self.results_dir = os.path.join(base_output_dir, "generated_images")
         
         self.results = []
         self.current_experiment = 0
         self.start_time = None
         self._cached_colors = None
         
+        # Create all directories with consistent permissions
         for dir_path in [self.base_output_dir, self.models_dir, self.results_dir]:
             os.makedirs(dir_path, exist_ok=True)
         
