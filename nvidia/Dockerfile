@@ -20,12 +20,7 @@ RUN pip install --no-cache-dir \
 ENV PYTHONPATH=/app
 ENV CUDA_VISIBLE_DEVICES=0
 
-# Verify CUDA and numba installation
-RUN python -c "import numba; print('Numba version:', numba.__version__)" && \
-    python -c "from numba import cuda; print('CUDA available:', cuda.is_available())" && \
-    python -c "import numpy as np; print('NumPy version:', np.__version__)"
-
-# Copy application code
+# Copy nvidia directory with training code
 COPY . .
 
 # Set Python path
@@ -34,23 +29,9 @@ ENV PYTHONPATH="/app:$PYTHONPATH"
 # Create results directory
 RUN mkdir -p /app/results
 
-# Add GPU detection script
-RUN echo '#!/bin/bash\n\
-echo "🔍 GPU Detection Report"\n\
-echo "====================="\n\
-nvidia-smi\n\
-echo ""\n\
-echo "🐍 Python CUDA Test"\n\
-echo "=================="\n\
-python -c "from numba import cuda; print(f\"CUDA available: {cuda.is_available()}\"); print(f\"CUDA devices: {cuda.list_devices()}\")" || echo "⚠️ CUDA test failed"\n\
-echo ""\n\
-echo "🚀 Starting parameter sweep..."\n\
-python experiments/parameter_sweep.py\n\
-' > /app/run_with_gpu_check.sh && chmod +x /app/run_with_gpu_check.sh
-
 # Health check to verify RTX 5090 is detected
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD python -c "from numba import cuda; assert cuda.is_available(), 'CUDA not available'" || exit 1
 
-# Run with GPU detection
-CMD ["/app/run_with_gpu_check.sh"] 
+# Run smoke test to validate system works (single experiment, 1 epoch)
+CMD ["python", "experiments/parameter_sweep.py", "--smoke-test"]

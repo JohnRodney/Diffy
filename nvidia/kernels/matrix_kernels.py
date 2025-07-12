@@ -1,26 +1,29 @@
 #!/usr/bin/env python3
 """
-RTX 5090 Optimized CUDA kernels for matrix operations
-Designed for maximum SM utilization across 170 streaming multiprocessors
+CUDA kernels for matrix operations
+Designed for maximum SM utilization across modern GPUs
 """
 
 import numba
 from numba import cuda
-import numpy as np
 import math
 
-# RTX 5090 Configuration Constants
-RTX5090_SM_COUNT = 170
-OPTIMAL_THREADS_PER_BLOCK = 512  # Sweet spot for RTX 5090
-MIN_BLOCKS_PER_SM = 4  # Minimum blocks per SM for good occupancy
-TARGET_BLOCKS = RTX5090_SM_COUNT * MIN_BLOCKS_PER_SM  # 680 blocks minimum
+# GPU Hardware Configuration Constants
+STREAMING_MULTIPROCESSOR_COUNT = 170
+OPTIMAL_THREADS_PER_BLOCK = 512
+MIN_BLOCKS_PER_SM = 4
+TARGET_BLOCKS = STREAMING_MULTIPROCESSOR_COUNT * MIN_BLOCKS_PER_SM
+
+# Neural Network Constants
+LEAKY_RELU_DEFAULT_ALPHA = 0.01
+MSE_GRADIENT_MULTIPLIER = 2.0
+SHARED_MEMORY_SIZE = 512
 
 @cuda.jit
 def gpu_matrix_multiply(A, B, C):
     """
     GPU matrix multiplication: C = A @ B
     A: (M, K), B: (K, N), C: (M, N)
-    Optimized for RTX 5090 with proper thread block sizing
     """
     row, col = cuda.grid(2)
     
@@ -35,12 +38,10 @@ def gpu_add_bias(matrix, bias, output):
     """
     Add bias to each row: output = matrix + bias
     matrix: (batch_size, features), bias: (features,)
-    Optimized for high parallelism
     """
     row, col = cuda.grid(2)
     
     if row < matrix.shape[0] and col < matrix.shape[1]:
-        # Explicitly cast to ensure scalar arithmetic
         matrix_val = matrix[row, col]
         bias_val = bias[col]
         output[row, col] = matrix_val + bias_val
@@ -49,7 +50,6 @@ def gpu_add_bias(matrix, bias, output):
 def gpu_leaky_relu_forward(input_data, output, alpha):
     """
     Leaky ReLU activation: output = max(alpha * input, input)
-    Massively parallel version for RTX 5090
     """
     idx = cuda.grid(1)
     
@@ -94,7 +94,7 @@ def gpu_mse_gradient(predicted, target, gradient):
     if idx < predicted.size:
         flat_idx = idx
         diff = predicted.flat[flat_idx] - target.flat[flat_idx]
-        gradient.flat[flat_idx] = 2.0 * diff / batch_size
+        gradient.flat[flat_idx] = MSE_GRADIENT_MULTIPLIER * diff / batch_size
 
 @cuda.jit
 def gpu_gradient_clip(gradient, max_norm):
@@ -161,12 +161,11 @@ def gpu_elementwise_activate(A, C):
     Elementwise activation (LeakyReLU): C = max(0.01 * A, A)
     """
     idx = cuda.grid(1)
-    alpha = 0.01
     
     if idx < A.size:
         flat_idx = idx
         val = A.flat[flat_idx]
-        C.flat[flat_idx] = max(alpha * val, val)
+        C.flat[flat_idx] = max(LEAKY_RELU_DEFAULT_ALPHA * val, val)
 
 @cuda.jit
 def gpu_elementwise_decay(A, C, decay_factor):
@@ -182,23 +181,20 @@ def gpu_elementwise_decay(A, C, decay_factor):
 @cuda.jit
 def gpu_reduce_sum(A, result):
     """
-    Reduction sum with shared memory optimization
+    Reduction sum with shared memory
     """
     idx = cuda.grid(1)
     tid = cuda.threadIdx.x
     
-    # Shared memory for block-level reduction
-    shared_sum = cuda.shared.array(512, numba.float32)
+    shared_sum = cuda.shared.array(SHARED_MEMORY_SIZE, numba.float32, ndim=1)
     
-    # Load data into shared memory
     if idx < A.size:
         shared_sum[tid] = A.flat[idx]
     else:
-        shared_sum[tid] = 0.0
+        shared_sum[tid] = numba.float32(0.0)
     
     cuda.syncthreads()
     
-    # Reduction within block
     stride = cuda.blockDim.x // 2
     while stride > 0:
         if tid < stride:
@@ -206,65 +202,47 @@ def gpu_reduce_sum(A, result):
         cuda.syncthreads()
         stride //= 2
     
-    # Write block result
     if tid == 0:
         cuda.atomic.add(result, 0, shared_sum[0])
 
+
+
 # RTX 5090 Optimized Helper Functions
-def launch_matrix_multiply_rtx5090(A, B, C):
+def launch_matrix_multiply(A, B, C):
     """
-    Launch matrix multiplication optimized for RTX 5090
-    Ensures >680 blocks across 170 SMs for maximum utilization
+    Launch matrix multiplication for maximum GPU utilization
     """
     M, N = C.shape
     
-    # Calculate grid dimensions for RTX 5090 optimization
-    # Use 32x16 threads per block = 512 threads (optimal for RTX 5090)
     threads_per_block = (32, 16)
     
-    # Calculate blocks needed
-    blocks_x = math.ceil(N / threads_per_block[1])  # columns
-    blocks_y = math.ceil(M / threads_per_block[0])  # rows
+    blocks_x = math.ceil(N / threads_per_block[1])
+    blocks_y = math.ceil(M / threads_per_block[0])
     total_blocks = blocks_x * blocks_y
     
-    # Ensure we have at least 680 blocks for RTX 5090 (4 blocks per SM)
     if total_blocks < TARGET_BLOCKS:
-        # Adjust thread block size to create more blocks
-        threads_per_block = (16, 16)  # 256 threads per block
+        threads_per_block = (16, 16)
         blocks_x = math.ceil(N / threads_per_block[1])
         blocks_y = math.ceil(M / threads_per_block[0])
         total_blocks = blocks_x * blocks_y
     
     blocks_per_grid = (blocks_y, blocks_x)
     
-    print(f"🚀 RTX5090 Matrix Multiply: {total_blocks} blocks across {RTX5090_SM_COUNT} SMs")
-    print(f"   Grid: {blocks_per_grid}, Threads: {threads_per_block}")
-    
-    # Launch kernel
     gpu_matrix_multiply[blocks_per_grid, threads_per_block](A, B, C)
     cuda.synchronize()
 
-def launch_elementwise_rtx5090(A, B, C, operation_type='add'):
+def launch_elementwise(A, B, C, operation_type='add'):
     """
-    Launch elementwise operations optimized for RTX 5090
-    Creates enough blocks to saturate all 170 SMs
+    Launch elementwise operations for maximum GPU utilization
     """
     total_elements = A.size
     
-    # Use 512 threads per block (optimal for RTX 5090)
     threads_per_block = OPTIMAL_THREADS_PER_BLOCK
     
-    # Calculate blocks needed based on actual work
     blocks_needed = math.ceil(total_elements / threads_per_block)
     
-    # Only enforce minimum block count for larger operations
-    if total_elements > 100000:  # Only for large operations
-        blocks_needed = max(blocks_needed, TARGET_BLOCKS)
+    blocks_needed = max(blocks_needed, TARGET_BLOCKS)
     
-    print(f"🚀 RTX5090 Elementwise {operation_type}: {blocks_needed} blocks, {total_elements} elements")
-    print(f"   Threads per block: {threads_per_block}, SM utilization: {min(100, blocks_needed/RTX5090_SM_COUNT*100):.1f}%")
-    
-    # Launch appropriate kernel
     if operation_type == 'add':
         gpu_elementwise_add[blocks_needed, threads_per_block](A, B, C)
     elif operation_type == 'multiply':
@@ -274,49 +252,25 @@ def launch_elementwise_rtx5090(A, B, C, operation_type='add'):
     elif operation_type == 'copy':
         gpu_copy_array[blocks_needed, threads_per_block](A, C)
     elif operation_type == 'decay':
-        # Weight decay operation: A *= 0.9999 (simple decay)
         gpu_elementwise_decay[blocks_needed, threads_per_block](A, C, 0.0001)
     elif operation_type == 'mse_loss':
-        # MSE loss computation: (A - B)^2
         gpu_mse_loss[blocks_needed, threads_per_block](A, B, C)
     elif operation_type == 'add_bias':
-        # Special handling for bias addition (2D operation)
-        if len(A.shape) == 2:  # Matrix + bias vector
+        if len(A.shape) == 2:
             threads_per_block_2d = (32, 16)
             blocks_x = math.ceil(A.shape[1] / threads_per_block_2d[1])
             blocks_y = math.ceil(A.shape[0] / threads_per_block_2d[0])
             blocks_per_grid = (blocks_y, blocks_x)
-            total_blocks_2d = blocks_x * blocks_y
-            print(f"   2D operation: {total_blocks_2d} blocks ({blocks_y}x{blocks_x} grid)")
             gpu_add_bias[blocks_per_grid, threads_per_block_2d](A, B, C)
         else:
             gpu_elementwise_add[blocks_needed, threads_per_block](A, B, C)
+    elif operation_type == 'mse_gradient':
+        gpu_mse_gradient[blocks_needed, threads_per_block](A, B, C)
+    elif operation_type == 'gradient_clip':
+        gpu_gradient_clip[blocks_needed, threads_per_block](A, 1.0)
+    elif operation_type == 'update_weights':
+        gpu_update_weights[blocks_needed, threads_per_block](A, B, 0.001)
+    elif operation_type == 'activate_derivative':
+        gpu_leaky_relu_backward[blocks_needed, threads_per_block](A, B, C, LEAKY_RELU_DEFAULT_ALPHA)
     
     cuda.synchronize()
-
-# Validation function
-def validate_rtx5090_utilization(blocks_per_grid, threads_per_block):
-    """
-    Validate that our configuration will properly utilize RTX 5090
-    """
-    if isinstance(blocks_per_grid, tuple):
-        total_blocks = blocks_per_grid[0] * blocks_per_grid[1]
-    else:
-        total_blocks = blocks_per_grid
-    
-    total_threads = total_blocks * (threads_per_block[0] * threads_per_block[1] if isinstance(threads_per_block, tuple) else threads_per_block)
-    
-    sm_utilization = min(total_blocks / RTX5090_SM_COUNT, 1.0)
-    
-    print(f"📊 RTX5090 Utilization Analysis:")
-    print(f"   Total blocks: {total_blocks}")
-    print(f"   Total threads: {total_threads}")
-    print(f"   SM utilization: {sm_utilization:.1%}")
-    print(f"   Blocks per SM: {total_blocks / RTX5090_SM_COUNT:.1f}")
-    
-    if sm_utilization < 0.8:
-        print(f"⚠️  WARNING: Low SM utilization {sm_utilization:.1%} - expect poor GPU performance")
-    else:
-        print(f"✅ Good SM utilization {sm_utilization:.1%} - should see high GPU usage")
-    
-    return sm_utilization 
