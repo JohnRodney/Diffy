@@ -37,7 +37,6 @@ if __name__ == "__main__":
         "leaky_relu_alpha": 0.01,
         "quick_test_epochs": 100, # Run 100 epochs as a quick test before full training
         "checkpoint_interval": 500, # Save checkpoint every 500 epochs
-        "keep_last_n_checkpoints": 5, # Keep only last 5 checkpoints
         "checkpoint_dir": args.checkpoint_dir # Use command line argument for checkpoint directory
     }
 
