@@ -9,14 +9,14 @@ import math
 from numba import cuda
 from kernels.matrix_kernels import (
     launch_matrix_multiply,
-    gpu_mse_gradient,
     gpu_gradient_clip,
     gpu_update_weights,
     gpu_leaky_relu_backward,
-    gpu_mse_loss,
     gpu_add_bias,
     gpu_leaky_relu_forward,
-    gpu_copy_array
+    gpu_copy_array,
+    gpu_cosine_similarity_loss,
+    gpu_cosine_similarity_gradient
 )
 from kernels.transpose_kernels import create_transpose_gpu
 
@@ -65,7 +65,7 @@ class GPUTextAutoencoder:
         # Log model information
         param_count = self._count_parameters()
         print(f"GPUTextAutoencoder initialized: {param_count:,} parameters")
-        
+    
     def _calculate_layer_sizes(self):
         """Calculate the size of each layer"""
         sizes = [self.vector_length]
@@ -212,10 +212,11 @@ class GPUTextAutoencoder:
         # Forward pass to get outputs (uses pre-allocated memory)
         final_output = self.forward(input_batch_gpu)
         
-        # Compute initial gradient (MSE loss)
+        # Compute initial gradient (Cosine similarity loss)
         current_grad = self.gradients[-1][:batch_size]
-        blocks, threads = calculate_launch_config(final_output.size)
-        gpu_mse_gradient[blocks, threads](final_output, target_batch_gpu, current_grad)
+        blocks_per_grid = batch_size
+        threads_per_block = min(final_output.shape[1], 512)
+        gpu_cosine_similarity_gradient[blocks_per_grid, threads_per_block](final_output, target_batch_gpu, current_grad)
         
         # Backward through all layers
         for i in reversed(range(len(self.weight_buffers))):
@@ -255,7 +256,7 @@ class GPUTextAutoencoder:
                 gpu_leaky_relu_backward[blocks, threads](layer_input_prev, prev_grad, prev_grad, self.alpha)
                 
                 current_grad = prev_grad
-        
+    
         # Single synchronization at the end
         cuda.synchronize()
     
@@ -285,9 +286,10 @@ class GPUTextAutoencoder:
         
         # Compute loss if needed
         final_output = self.forward(batch_gpu)
-        loss_gpu = cuda.device_array_like(final_output)
-        blocks, threads = calculate_launch_config(final_output.size)
-        gpu_mse_loss[blocks, threads](final_output, target_batch_gpu, loss_gpu)
+        loss_gpu = cuda.device_array((len(batch_indices),), dtype=np.float32)
+        blocks_per_grid = len(batch_indices)
+        threads_per_block = 1
+        gpu_cosine_similarity_loss[blocks_per_grid, threads_per_block](final_output, target_batch_gpu, loss_gpu)
         
         loss_cpu = loss_gpu.copy_to_host()
         return float(np.mean(loss_cpu))

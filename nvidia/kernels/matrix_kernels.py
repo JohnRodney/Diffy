@@ -97,6 +97,77 @@ def gpu_mse_gradient(predicted, target, gradient):
         gradient.flat[flat_idx] = MSE_GRADIENT_MULTIPLIER * diff / batch_size
 
 @cuda.jit
+def gpu_cosine_similarity_loss(predicted, target, loss_output):
+    """
+    Cosine similarity loss: 1 - cos_sim
+    Loss per sample, computed across vector dimensions
+    """
+    batch_size = predicted.shape[0]
+    vector_size = predicted.shape[1]
+    
+    sample_idx = cuda.blockIdx.x
+    
+    if sample_idx < batch_size:
+        dot_product = 0.0
+        pred_norm_sq = 0.0
+        target_norm_sq = 0.0
+        
+        for dim in range(vector_size):
+            pred_val = predicted[sample_idx, dim]
+            target_val = target[sample_idx, dim]
+            
+            dot_product += pred_val * target_val
+            pred_norm_sq += pred_val * pred_val
+            target_norm_sq += target_val * target_val
+        
+        pred_norm = math.sqrt(pred_norm_sq)
+        target_norm = math.sqrt(target_norm_sq)
+        
+        if pred_norm > 1e-8 and target_norm > 1e-8:
+            cos_sim = dot_product / (pred_norm * target_norm)
+            loss_output[sample_idx] = 1.0 - cos_sim
+        else:
+            loss_output[sample_idx] = 1.0
+
+@cuda.jit
+def gpu_cosine_similarity_gradient(predicted, target, gradient):
+    """
+    Cosine similarity gradient: -(target - predicted * cos_sim) / (|predicted| * |target|)
+    """
+    batch_size = predicted.shape[0]
+    vector_size = predicted.shape[1]
+    
+    sample_idx = cuda.blockIdx.x
+    dim_idx = cuda.threadIdx.x
+    
+    if sample_idx < batch_size and dim_idx < vector_size:
+        dot_product = 0.0
+        pred_norm_sq = 0.0
+        target_norm_sq = 0.0
+        
+        for dim in range(vector_size):
+            pred_val = predicted[sample_idx, dim]
+            target_val = target[sample_idx, dim]
+            
+            dot_product += pred_val * target_val
+            pred_norm_sq += pred_val * pred_val
+            target_norm_sq += target_val * target_val
+        
+        pred_norm = math.sqrt(pred_norm_sq)
+        target_norm = math.sqrt(target_norm_sq)
+        
+        if pred_norm > 1e-8 and target_norm > 1e-8:
+            cos_sim = dot_product / (pred_norm * target_norm)
+            norm_product = pred_norm * target_norm
+            
+            target_val = target[sample_idx, dim_idx]
+            pred_val = predicted[sample_idx, dim_idx]
+            
+            gradient[sample_idx, dim_idx] = -(target_val - pred_val * cos_sim) / norm_product
+        else:
+            gradient[sample_idx, dim_idx] = 0.0
+
+@cuda.jit
 def gpu_gradient_clip(gradient, max_norm):
     """
     Clip gradients to max_norm
@@ -272,5 +343,46 @@ def launch_elementwise(A, B, C, operation_type='add'):
         gpu_update_weights[blocks_needed, threads_per_block](A, B, 0.001)
     elif operation_type == 'activate_derivative':
         gpu_leaky_relu_backward[blocks_needed, threads_per_block](A, B, C, LEAKY_RELU_DEFAULT_ALPHA)
+    elif operation_type == 'cosine_loss':
+        launch_cosine_similarity_loss(A, B, C)
+        return
+    elif operation_type == 'cosine_gradient':
+        launch_cosine_similarity_gradient(A, B, C)
+        return
     
+    cuda.synchronize()
+
+def launch_cosine_similarity_loss(predicted, target, loss_output):
+    """
+    Launch cosine similarity loss computation for maximum GPU utilization
+    predicted: (batch_size, vector_size)
+    target: (batch_size, vector_size)  
+    loss_output: (batch_size,)
+    """
+    batch_size = predicted.shape[0]
+    
+    threads_per_block = 1
+    blocks_per_grid = batch_size
+    
+    blocks_per_grid = max(blocks_per_grid, TARGET_BLOCKS // 4)
+    
+    gpu_cosine_similarity_loss[blocks_per_grid, threads_per_block](predicted, target, loss_output)
+    cuda.synchronize()
+
+def launch_cosine_similarity_gradient(predicted, target, gradient):
+    """
+    Launch cosine similarity gradient computation for maximum GPU utilization
+    predicted: (batch_size, vector_size)
+    target: (batch_size, vector_size)
+    gradient: (batch_size, vector_size)
+    """
+    batch_size = predicted.shape[0]
+    vector_size = predicted.shape[1]
+    
+    threads_per_block = min(vector_size, OPTIMAL_THREADS_PER_BLOCK)
+    blocks_per_grid = batch_size
+    
+    blocks_per_grid = max(blocks_per_grid, TARGET_BLOCKS // 4)
+    
+    gpu_cosine_similarity_gradient[blocks_per_grid, threads_per_block](predicted, target, gradient)
     cuda.synchronize()

@@ -5,12 +5,14 @@ Simple smoke test for GPU autoencoder
 
 import numpy as np
 import os
+import argparse
+import time
 from gpu_networks.gpu_text_autoencoder import GPUTextAutoencoder
 from color_loader import load_colors_from_json
 from tokenizer.text_tokenizer import Tokenizer
 from numba import cuda
 
-def load_data(vector_length):
+def load_data(vector_length, vector_method="random"):
     """Load color data for training"""
     try:
         colors_data = load_colors_from_json("colors_a_f.json")
@@ -25,21 +27,33 @@ def load_data(vector_length):
     if not color_names:
         raise ValueError("No color names found")
     
-    tokenizer = Tokenizer(vocab_size=len(color_names))
-    tokenizer.fill_dictionary(color_names)
-    
     training_data = []
-    for name in color_names:
-        tokens = tokenizer.tokenize(name)
-        encoded = np.zeros(vector_length, dtype=np.float32)
-        for i, token in enumerate(tokens[:vector_length]):
-            encoded[i] = float(token)
-        training_data.append((encoded, name))
+    
+    if vector_method == "tokenized":
+        # Use tokenizer to create sparse vectors (the "bug" for research)
+        tokenizer = Tokenizer(vocab_size=len(color_names))
+        tokenizer.fill_dictionary(color_names)
+        
+        for name in color_names:
+            tokens = tokenizer.tokenize(name)
+            encoded = np.zeros(vector_length, dtype=np.float32)
+            for i, token in enumerate(tokens[:vector_length]):
+                encoded[i] = float(token)
+            training_data.append((encoded, name))
+    else:
+        # Create random vectors for each color name (like CPU version)
+        for name in color_names:
+            # Generate unique random vector for this color
+            encoded = np.random.rand(vector_length).astype(np.float32)
+            training_data.append((encoded, name))
     
     return training_data
 
-def smoke_test():
+def smoke_test(vector_method="random"):
     """Simple smoke test with real data"""
+    
+    # Record start time
+    start_time = time.time()
     
     # Simple test parameters
     params = {
@@ -49,7 +63,8 @@ def smoke_test():
         'learning_rate': 0.001,
         'leaky_relu_alpha': 0.01,
         'batch_size': 256,
-        'grad_clip_norm': 1
+        'grad_clip_norm': 1,
+        "epochs": 10000,
     }
     
     # Create model
@@ -61,13 +76,24 @@ def smoke_test():
     )
             
     # Load real data
-    training_data = load_data(params['vector_length'])
+    training_data = load_data(params['vector_length'], vector_method)
     training_data_array = np.array([item[0] for item in training_data], dtype=np.float32)
     
-    # Keep tokenizer reference for saving dictionary
-    colors_data = load_colors_from_json("colors_a_f.json")
-    tokenizer = Tokenizer(vocab_size=len(colors_data))
-    tokenizer.fill_dictionary(colors_data)
+    # Calculate and report similarity for research purposes
+    mean_similarity = 0.0
+    if len(training_data_array) > 1:
+        similarity_sum = 0
+        count = 0
+        for i in range(len(training_data_array)):
+            for j in range(i + 1, len(training_data_array)):
+                dot_product = np.dot(training_data_array[i], training_data_array[j])
+                norm_i = np.linalg.norm(training_data_array[i])
+                norm_j = np.linalg.norm(training_data_array[j])
+                if norm_i > 0 and norm_j > 0:
+                    similarity_sum += dot_product / (norm_i * norm_j)
+                    count += 1
+        mean_similarity = similarity_sum / count if count > 0 else 0
+        print(f"Mean cosine similarity ({vector_method}): {mean_similarity:.6f}")
     
     # Set hyperparameters in the model
     gpu_ae.set_learning_rate(params['learning_rate'])
@@ -78,12 +104,16 @@ def smoke_test():
     gpu_ae.dataset_size = len(training_data_array)
     
     print(f"Training on {len(training_data_array)} color vectors")
-        
-        # Training loop
+    
+    # Training setup
+    total_epochs = params['epochs']
     best_loss = float('inf')
+    best_loss_epoch = 0
+    final_loss = float('inf')
     batch_size = min(params['batch_size'], len(training_data_array))
     
-    for epoch in range(35000):
+    # Training loop
+    for epoch in range(total_epochs):
         indices = np.random.permutation(len(training_data_array))
         
         # Train on all batches using indices
@@ -100,16 +130,29 @@ def smoke_test():
                 sample_batch[j] = gpu_ae.dataset_gpu[idx]
             output = gpu_ae.infer(sample_batch.copy_to_host())
             input_data = sample_batch.copy_to_host()
-            loss = float(np.mean((input_data - output)**2))
+            # Cosine similarity loss: 1 - cosine_similarity
+            cos_sim = np.sum(input_data * output, axis=1) / (np.linalg.norm(input_data, axis=1) * np.linalg.norm(output, axis=1))
+            loss = float(np.mean(1 - cos_sim))
+            final_loss = loss  # Track the most recent loss
             
             if loss < best_loss:
                 best_loss = loss
-            
-            print(f"Epoch {epoch}: Loss = {loss:.6f}")
+                best_loss_epoch = epoch
+                print(f"Epoch {epoch}: Loss = {loss:.6f} (NEW BEST)")
+            else:
+                print(f"Epoch {epoch}: Loss = {loss:.6f} (best: {best_loss:.6f} at epoch {best_loss_epoch})")
+    
+    # Calculate training duration
+    end_time = time.time()
+    training_duration = end_time - start_time
     
     # Save best model
     os.makedirs("/models", exist_ok=True)
     weights_cpu, biases_cpu = gpu_ae.export_weights()
+    
+    # Get REAL model outputs for analysis (while CUDA actually works!)
+    print("Saving real model outputs for analysis...")
+    real_model_outputs = gpu_ae.infer(training_data_array)
     
     save_dict = {}
     for i, (w, b) in enumerate(zip(weights_cpu, biases_cpu)):
@@ -118,13 +161,26 @@ def smoke_test():
                     
     save_dict['training_vectors'] = training_data_array
     save_dict['training_names'] = [item[1] for item in training_data]
-    save_dict['final_loss'] = best_loss
+    save_dict['model_outputs'] = real_model_outputs
+    save_dict['best_loss'] = best_loss
+    save_dict['best_loss_epoch'] = best_loss_epoch
+    save_dict['final_loss'] = final_loss
+    save_dict['final_epoch'] = total_epochs - 1
     save_dict['parameters'] = params
-    save_dict['tokenizer_vocab'] = tokenizer.vocab  # Save the dictionary!
+    save_dict['vector_method'] = vector_method
+    save_dict['mean_cosine_similarity'] = mean_similarity
+    save_dict['training_start_time'] = start_time
+    save_dict['training_end_time'] = end_time
+    save_dict['training_duration_seconds'] = training_duration
+    save_dict['epochs_per_second'] = total_epochs / training_duration
+    save_dict['dataset_size'] = len(training_data_array)
     
     np.savez_compressed("/app/models/smoke_test_model.npz", **save_dict)
     
-    print(f"Final loss: {best_loss:.6f}")
+    print(f"Best loss: {best_loss:.6f} at epoch {best_loss_epoch}")
+    print(f"Final loss: {final_loss:.6f}")
+    print(f"Training duration: {training_duration:.2f} seconds")
+    print(f"Epochs per second: {total_epochs / training_duration:.2f}")
     print("Model saved to /app/models/smoke_test_model.npz")
     
     # Clean up GPU memory when completely done
@@ -134,4 +190,10 @@ def smoke_test():
 
 
 if __name__ == "__main__":
-    smoke_test() 
+    parser = argparse.ArgumentParser(description="GPU autoencoder smoke test")
+    parser.add_argument("--vector-method", choices=["random", "tokenized"], default="random",
+                        help="Method for generating vectors: random (like CPU version) or tokenized (research bug)")
+    args = parser.parse_args()
+    
+    print(f"Using vector method: {args.vector_method}")
+    smoke_test(args.vector_method) 
