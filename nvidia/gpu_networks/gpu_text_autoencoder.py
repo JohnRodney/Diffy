@@ -7,7 +7,7 @@ All operations happen on GPU memory - no CPU transfers during training
 import numpy as np
 import math
 from numba import cuda
-from nvidia.kernels.matrix_kernels import (
+from kernels.matrix_kernels import (
     launch_matrix_multiply,
     gpu_mse_gradient,
     gpu_gradient_clip,
@@ -18,7 +18,7 @@ from nvidia.kernels.matrix_kernels import (
     gpu_leaky_relu_forward,
     gpu_copy_array
 )
-from nvidia.kernels.transpose_kernels import create_transpose_gpu
+from kernels.transpose_kernels import create_transpose_gpu
 
 class GPUTextAutoencoder:
     """

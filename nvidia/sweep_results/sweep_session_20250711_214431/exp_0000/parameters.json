@@ -1,9 +1,0 @@
-{
-  "vector_length": 512,
-  "hidden_layer_count": 2,
-  "bottleneck_size": 128,
-  "learning_rate": 0.001,
-  "leaky_relu_alpha": 0.01,
-  "batch_size": 32,
-  "grad_clip_norm": 0.5
-}

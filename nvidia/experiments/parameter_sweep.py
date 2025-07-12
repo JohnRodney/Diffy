@@ -10,10 +10,10 @@ import time
 import os
 import itertools
 from datetime import datetime
-from nvidia.gpu_networks.gpu_text_autoencoder import GPUTextAutoencoder
-from nvidia.gpu_networks.batch_manager import create_batch_manager
+from gpu_networks.gpu_text_autoencoder import GPUTextAutoencoder
+from gpu_networks.batch_manager import create_batch_manager
 from color_loader import load_colors_from_json
-from tokenizer.tokenizer import Tokenizer
+from tokenizer.text_tokenizer import Tokenizer
 
 # Training Configuration Constants
 STABILIZED_LEARNING_RATE_LOW = 0.00001
@@ -83,6 +83,7 @@ class ParameterSweep:
         self.results = []
         self.current_experiment = 0
         self.start_time = None
+        self._cached_colors = None
         
         for dir_path in [self.base_output_dir, self.models_dir, self.results_dir]:
             os.makedirs(dir_path, exist_ok=True)
@@ -196,6 +197,24 @@ class ParameterSweep:
         
         experiment_time = time.time() - experiment_start
         
+        # Save model with training data for reconstruction testing
+        model_file = os.path.join(self.models_dir, f"exp_{experiment_id:04d}_best_model.npz")
+        weights_cpu, biases_cpu = gpu_ae.export_weights()
+        save_dict = {}
+        
+        # Save model weights and biases
+        for i, (w, b) in enumerate(zip(weights_cpu, biases_cpu)):
+            save_dict[f'weight_{i}'] = w
+            save_dict[f'bias_{i}'] = b
+        
+        # Save training data for reconstruction testing
+        save_dict['training_vectors'] = np.array([item[0] for item in training_data], dtype=np.float32)
+        save_dict['training_names'] = [item[1] for item in training_data]
+        save_dict['final_loss'] = best_loss
+        save_dict['parameters'] = params
+        
+        np.savez_compressed(model_file, **save_dict)
+        
         result = {
             'experiment_id': experiment_id,
             'parameters': params,
@@ -204,7 +223,8 @@ class ParameterSweep:
             'total_epochs': epoch + 1,
             'training_time': experiment_time,
             'convergence_achieved': no_improve_count < patience,
-            'status': 'completed'
+            'status': 'completed',
+            'model_file': model_file
         }
         
         results_file = os.path.join(exp_dir, "results.json")
@@ -220,12 +240,15 @@ class ParameterSweep:
         if load_colors_from_json is None:
             return self.create_dummy_training_data(264, vector_length)
         
-        try:
-            colors_data = load_colors_from_json("colors_a_f.json")
-            if not colors_data:
+        if self._cached_colors is None:
+            try:
+                self._cached_colors = load_colors_from_json("colors_a_f.json")
+                if not self._cached_colors:
+                    return self.create_dummy_training_data(264, vector_length)
+            except FileNotFoundError:
                 return self.create_dummy_training_data(264, vector_length)
-        except FileNotFoundError:
-            return self.create_dummy_training_data(264, vector_length)
+        
+        colors_data = self._cached_colors
         
         color_names = []
         for color in colors_data:
