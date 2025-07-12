@@ -210,25 +210,6 @@ def gpu_reduce_sum(A, result):
     if tid == 0:
         cuda.atomic.add(result, 0, shared_sum[0])
 
-# Fused kernel for better performance
-@cuda.jit
-def gpu_fused_linear_relu(input_data, weights, bias, output, alpha):
-    """
-    Fused operation: Linear + LeakyReLU
-    Reduces memory bandwidth and increases SM efficiency
-    """
-    row, col = cuda.grid(2)
-    
-    if row < output.shape[0] and col < output.shape[1]:
-        # Linear transformation
-        temp = 0.0
-        for k in range(weights.shape[0]):
-            temp += input_data[row, k] * weights[k, col]
-        temp += bias[col]
-        
-        # LeakyReLU activation
-        output[row, col] = max(alpha * temp, temp)
-
 # RTX 5090 Optimized Helper Functions
 def launch_matrix_multiply_rtx5090(A, B, C):
     """
@@ -312,39 +293,6 @@ def launch_elementwise_rtx5090(A, B, C, operation_type='add'):
             gpu_elementwise_add[blocks_needed, threads_per_block](A, B, C)
     
     cuda.synchronize()
-
-def launch_reduce_rtx5090(A, result):
-    """
-    Launch reduction operations optimized for RTX 5090
-    Uses hierarchical reduction for maximum SM utilization
-    """
-    total_elements = A.size
-    
-    # Use 512 threads per block with shared memory reduction
-    threads_per_block = OPTIMAL_THREADS_PER_BLOCK
-    
-    # Calculate blocks needed for first stage
-    blocks_needed = math.ceil(total_elements / threads_per_block)
-    blocks_needed = max(blocks_needed, TARGET_BLOCKS)
-    
-    print(f"🚀 RTX5090 Reduction: {blocks_needed} blocks across {RTX5090_SM_COUNT} SMs")
-    
-    # First stage: reduce within blocks
-    gpu_reduce_sum[blocks_needed, threads_per_block](A, result)
-    cuda.synchronize()
-
-# Helper function to get optimal configuration
-def get_rtx5090_config(matrix_size):
-    """
-    Get optimal thread/block configuration for RTX 5090 based on matrix size
-    """
-    M, N = matrix_size
-    
-    # For very large matrices, use smaller thread blocks to create more blocks
-    if M * N > 1000000:  # 1M elements
-        return (16, 16), TARGET_BLOCKS
-    else:
-        return (32, 16), TARGET_BLOCKS // 2
 
 # Validation function
 def validate_rtx5090_utilization(blocks_per_grid, threads_per_block):

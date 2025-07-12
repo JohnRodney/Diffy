@@ -16,7 +16,6 @@ try:
     from matrix_kernels import (
         launch_matrix_multiply_rtx5090,
         launch_elementwise_rtx5090,
-        launch_reduce_rtx5090,
         validate_rtx5090_utilization
     )
     RTX5090_KERNELS_AVAILABLE = True
