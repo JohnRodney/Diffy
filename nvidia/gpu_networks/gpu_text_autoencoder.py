@@ -16,7 +16,16 @@ from kernels.matrix_kernels import (
     gpu_leaky_relu_forward,
     gpu_copy_array,
     gpu_cosine_similarity_loss,
-    gpu_cosine_similarity_gradient
+    gpu_cosine_similarity_gradient,
+    gpu_elementwise_add
+)
+from kernels.diversification_kernels import (
+    launch_batch_diversity_gradient,
+    launch_combined_diversity_loss
+)
+from kernels.home_position_kernels import (
+    launch_home_position_gradient,
+    launch_combined_cosine_home_loss
 )
 from kernels.transpose_kernels import create_transpose_gpu
 
@@ -200,7 +209,8 @@ class GPUTextAutoencoder:
     
     def backward(self, input_batch_gpu, target_batch_gpu, learning_rate, grad_clip_norm):
         """
-        Backward pass with RTX 5090 optimized kernels and proper memory bounds checking
+        Backward pass with Euclidean distance diversity penalty
+        Uses cosine similarity for reconstruction + Euclidean distance for diversity
         """
         batch_size = input_batch_gpu.shape[0]
         max_batch_size = self.layer_outputs[0].shape[0]
@@ -212,11 +222,24 @@ class GPUTextAutoencoder:
         # Forward pass to get outputs (uses pre-allocated memory)
         final_output = self.forward(input_batch_gpu)
         
-        # Compute initial gradient (Cosine similarity loss)
+        # Compute initial gradient (Cosine similarity for reconstruction)
         current_grad = self.gradients[-1][:batch_size]
         blocks_per_grid = batch_size
         threads_per_block = min(final_output.shape[1], 512)
         gpu_cosine_similarity_gradient[blocks_per_grid, threads_per_block](final_output, target_batch_gpu, current_grad)
+        
+        # Add home position gradient to anchor vectors to their training positions
+        position_grad = cuda.device_array_like(current_grad)
+        # Use the input batch as training vectors (for autoencoder, input = training target)
+        batch_training_vectors = input_batch_gpu
+        
+        launch_home_position_gradient(final_output, batch_training_vectors, position_grad, 
+                                     getattr(self, 'position_weight', 1.0),
+                                     getattr(self, 'max_home_distance', 2.0))
+        
+        # Combine gradients: cosine similarity reconstruction + home position penalty
+        blocks, threads = calculate_launch_config(current_grad.size)
+        gpu_elementwise_add[blocks, threads](current_grad, position_grad, current_grad)
         
         # Backward through all layers
         for i in reversed(range(len(self.weight_buffers))):
@@ -268,6 +291,11 @@ class GPUTextAutoencoder:
         """Set gradient clipping norm for training"""
         self.grad_clip_norm = grad_clip_norm
     
+    def set_home_position_params(self, max_home_distance, position_weight):
+        """Set parameters for home position penalty"""
+        self.max_home_distance = max_home_distance
+        self.position_weight = position_weight
+    
     def train_batch(self, batch_indices):
         """
         Train on a batch using internal dataset and hyperparameters
@@ -284,12 +312,17 @@ class GPUTextAutoencoder:
         # Forward and backward pass using internal hyperparameters
         self.backward(batch_gpu, target_batch_gpu, self.learning_rate, self.grad_clip_norm)
         
-        # Compute loss if needed
+        # Compute loss if needed (euclidean distance from home positions)
         final_output = self.forward(batch_gpu)
         loss_gpu = cuda.device_array((len(batch_indices),), dtype=np.float32)
-        blocks_per_grid = len(batch_indices)
-        threads_per_block = 1
-        gpu_cosine_similarity_loss[blocks_per_grid, threads_per_block](final_output, target_batch_gpu, loss_gpu)
+        # Get the corresponding training vectors for this batch
+        batch_training_vectors = cuda.device_array((len(batch_indices), self.vector_length), dtype=np.float32)
+        for i, batch_idx in enumerate(batch_indices):
+            batch_training_vectors[i] = self.dataset_gpu[batch_idx]
+        
+        launch_combined_cosine_home_loss(final_output, target_batch_gpu, batch_training_vectors, loss_gpu,
+                                        getattr(self, 'position_weight', 1.0),
+                                        getattr(self, 'max_home_distance', 2.0))
         
         loss_cpu = loss_gpu.copy_to_host()
         return float(np.mean(loss_cpu))

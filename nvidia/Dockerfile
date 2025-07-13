@@ -5,6 +5,7 @@ FROM pytorch/pytorch:2.2.0-cuda12.1-cudnn8-devel
 RUN apt-get update && apt-get install -y \
     git \
     curl \
+    bc \
     && rm -rf /var/lib/apt/lists/*
 
 # Create working directory
@@ -29,8 +30,11 @@ ENV PYTHONPATH="/app:$PYTHONPATH"
 # Create /models directory for all outputs (fixes root permission issue)
 RUN mkdir -p /models
 
+# Make experiment script executable
+RUN chmod +x run_experiments.sh
+
 # Health check to verify RTX 5090 is detected
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD python -c "from numba import cuda; assert cuda.is_available(), 'CUDA not available'" || exit 1
 
-CMD ["python", "experiments/parameter_sweep.py"]
+CMD ["./run_experiments.sh"]
