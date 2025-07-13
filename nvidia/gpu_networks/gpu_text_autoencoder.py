@@ -28,6 +28,7 @@ from kernels.home_position_kernels import (
     launch_combined_cosine_home_loss
 )
 from kernels.transpose_kernels import create_transpose_gpu
+from gpu_networks.pca_initialization import compute_pca_weights
 
 def calculate_launch_config(total_elements, threads_per_block=512):
     """Calculate CUDA launch configuration for 1D kernels"""
@@ -76,17 +77,22 @@ class GPUTextAutoencoder:
         print(f"GPUTextAutoencoder initialized: {param_count:,} parameters")
     
     def _calculate_layer_sizes(self):
-        """Calculate the size of each layer"""
+        """Calculate gradual stepdown layer sizes using geometric progression"""
         sizes = [self.vector_length]
         
-        # Encoder layers
+        if self.hidden_layer_count == 0:
+            # Direct connection: input -> bottleneck -> output
+            sizes.append(self.bottleneck_size)
+            sizes.append(self.vector_length)
+        else:
+            # Geometric stepdown for smoother compression
+            ratio = (self.bottleneck_size / self.vector_length) ** (1.0 / (self.hidden_layer_count + 1))
+            
+            # Encoder layers: gradual geometric reduction
         current_size = self.vector_length
-        reduction_factor = math.ceil((self.vector_length - self.bottleneck_size) / self.hidden_layer_count)
-        
         for i in range(self.hidden_layer_count):
-            next_size = max(current_size - reduction_factor, self.bottleneck_size)
-            sizes.append(next_size)
-            current_size = next_size
+            current_size = max(int(current_size * ratio), self.bottleneck_size)
+            sizes.append(current_size)
             if current_size == self.bottleneck_size:
                 break
         
@@ -95,24 +101,42 @@ class GPUTextAutoencoder:
             sizes.append(self.bottleneck_size)
         
         # Decoder layers (mirror of encoder, excluding input and bottleneck)
-        encoder_sizes = sizes[1:-1]  # Get middle layers (exclude input and bottleneck)
-        encoder_sizes.reverse()      # Reverse the order
+            encoder_sizes = sizes[1:-1]  # Get middle layers
+            encoder_sizes.reverse()      # Reverse for decoder
         
         # Add decoder layers: bottleneck -> ... -> output
         sizes.extend(encoder_sizes)
-        sizes.append(self.vector_length)  # Final output layer
+        sizes.append(self.vector_length)
         
         return sizes
     
     def _initialize_weights_in_gpu(self):
         """Initialize weights directly in GPU memory buffers"""
+        
+        # Try PCA initialization if training data is available
+        use_pca = hasattr(self, 'training_data') and self.training_data is not None
+        encoder_weights = None
+        decoder_weights = None
+        
+        if use_pca:
+            encoder_weights, decoder_weights = compute_pca_weights(
+                self.training_data, self.bottleneck_size
+            )
+        
         for i in range(len(self.layer_sizes) - 1):
             input_size = self.layer_sizes[i]
             output_size = self.layer_sizes[i + 1]
             
-            # Xavier initialization on CPU first (for proper random distribution)
-            limit = math.sqrt(6.0 / (input_size + output_size))
-            weights_cpu = np.random.uniform(-limit, limit, (input_size, output_size)).astype(np.float32)
+            # Use PCA weights for encoder (first) and decoder (last) layers
+            if use_pca and i == 0 and encoder_weights is not None:  # Encoder layer
+                weights_cpu = encoder_weights.copy()
+            elif use_pca and i == len(self.layer_sizes) - 2 and decoder_weights is not None:  # Decoder layer
+                weights_cpu = decoder_weights.copy()
+            else:  # Middle layers or fallback to random
+                # Xavier initialization on CPU first (for proper random distribution)
+                limit = math.sqrt(6.0 / (input_size + output_size))
+                weights_cpu = np.random.uniform(-limit, limit, (input_size, output_size)).astype(np.float32)
+            
             biases_cpu = np.zeros(output_size, dtype=np.float32)
             
             # Create GPU buffers and initialize with CPU data
@@ -295,6 +319,10 @@ class GPUTextAutoencoder:
         """Set parameters for home position penalty"""
         self.max_home_distance = max_home_distance
         self.position_weight = position_weight
+    
+    def set_training_data_for_pca(self, training_data):
+        """Set training data for PCA-based weight initialization"""
+        self.training_data = training_data
     
     def train_batch(self, batch_indices):
         """
