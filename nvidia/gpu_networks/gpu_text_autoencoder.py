@@ -14,18 +14,15 @@ from kernels.matrix_kernels import (
     gpu_leaky_relu_backward,
     gpu_add_bias,
     gpu_leaky_relu_forward,
-    gpu_copy_array,
-    gpu_cosine_similarity_loss,
-    gpu_cosine_similarity_gradient,
-    gpu_elementwise_add
+    gpu_copy_array
 )
-from kernels.diversification_kernels import (
-    launch_batch_diversity_gradient,
-    launch_combined_diversity_loss
+from kernels.loss_kernels import (
+    launch_mse_loss,
+    launch_mse_gradient
 )
-from kernels.home_position_kernels import (
-    launch_home_position_gradient,
-    launch_combined_cosine_home_loss
+from kernels.embedding_kernels import (
+    launch_embedding_lookup,
+    launch_embedding_gradient
 )
 from kernels.transpose_kernels import create_transpose_gpu
 from gpu_networks.pca_initialization import compute_pca_weights
@@ -60,6 +57,10 @@ class GPUTextAutoencoder:
         # Internal dataset storage
         self.dataset_gpu: cuda.DeviceNDArray | None = None
         self.dataset_size = 0
+        
+        # Embedding table for token-based input
+        self.embedding_table: cuda.DeviceNDArray | None = None
+        self.use_embeddings = False
         
         # GPU memory buffers (no class weight storage)
         self.weight_buffers = []  # Direct GPU weight buffers
@@ -134,8 +135,8 @@ class GPUTextAutoencoder:
                 weights_cpu = decoder_weights.copy()
             else:  # Middle layers or fallback to random
                 # Xavier initialization on CPU first (for proper random distribution)
-                limit = math.sqrt(6.0 / (input_size + output_size))
-                weights_cpu = np.random.uniform(-limit, limit, (input_size, output_size)).astype(np.float32)
+            limit = math.sqrt(6.0 / (input_size + output_size))
+            weights_cpu = np.random.uniform(-limit, limit, (input_size, output_size)).astype(np.float32)
             
             biases_cpu = np.zeros(output_size, dtype=np.float32)
             
@@ -231,10 +232,9 @@ class GPUTextAutoencoder:
         
         return current_output
     
-    def backward(self, input_batch_gpu, target_batch_gpu, learning_rate, grad_clip_norm):
+    def backward(self, input_batch_gpu, target_batch_gpu, learning_rate, grad_clip_norm, batch_indices=None):
         """
-        Backward pass with Euclidean distance diversity penalty
-        Uses cosine similarity for reconstruction + Euclidean distance for diversity
+        Simple backward pass with MSE loss
         """
         batch_size = input_batch_gpu.shape[0]
         max_batch_size = self.layer_outputs[0].shape[0]
@@ -246,24 +246,9 @@ class GPUTextAutoencoder:
         # Forward pass to get outputs (uses pre-allocated memory)
         final_output = self.forward(input_batch_gpu)
         
-        # Compute initial gradient (Cosine similarity for reconstruction)
+        # Compute initial gradient (Simple MSE for reconstruction)
         current_grad = self.gradients[-1][:batch_size]
-        blocks_per_grid = batch_size
-        threads_per_block = min(final_output.shape[1], 512)
-        gpu_cosine_similarity_gradient[blocks_per_grid, threads_per_block](final_output, target_batch_gpu, current_grad)
-        
-        # Add home position gradient to anchor vectors to their training positions
-        position_grad = cuda.device_array_like(current_grad)
-        # Use the input batch as training vectors (for autoencoder, input = training target)
-        batch_training_vectors = input_batch_gpu
-        
-        launch_home_position_gradient(final_output, batch_training_vectors, position_grad, 
-                                     getattr(self, 'position_weight', 1.0),
-                                     getattr(self, 'max_home_distance', 2.0))
-        
-        # Combine gradients: cosine similarity reconstruction + home position penalty
-        blocks, threads = calculate_launch_config(current_grad.size)
-        gpu_elementwise_add[blocks, threads](current_grad, position_grad, current_grad)
+        launch_mse_gradient(final_output, target_batch_gpu, current_grad)
         
         # Backward through all layers
         for i in reversed(range(len(self.weight_buffers))):
@@ -304,6 +289,24 @@ class GPUTextAutoencoder:
                 
                 current_grad = prev_grad
     
+        # Update embedding table if using embeddings
+        if self.use_embeddings and batch_indices is not None and self.embedding_table is not None and self.dataset_gpu is not None:
+            # Get token IDs for this batch
+            batch_token_ids = cuda.device_array((batch_size,), dtype=np.int32)
+            for i, idx in enumerate(batch_indices):
+                batch_token_ids[i] = self.dataset_gpu[idx]
+            
+            # Get gradients for the first layer (input layer)
+            input_grad = self.gradients[0][:batch_size]
+            
+            # Update embedding table
+            embedding_grad = cuda.device_array_like(self.embedding_table)
+            launch_embedding_gradient(batch_token_ids, input_grad, embedding_grad)
+            
+            # Apply embedding updates
+            blocks, threads = calculate_launch_config(self.embedding_table.size)
+            gpu_update_weights[blocks, threads](self.embedding_table, embedding_grad, learning_rate)
+    
         # Single synchronization at the end
         cuda.synchronize()
     
@@ -315,14 +318,21 @@ class GPUTextAutoencoder:
         """Set gradient clipping norm for training"""
         self.grad_clip_norm = grad_clip_norm
     
-    def set_home_position_params(self, max_home_distance, position_weight):
-        """Set parameters for home position penalty"""
-        self.max_home_distance = max_home_distance
-        self.position_weight = position_weight
+
     
     def set_training_data_for_pca(self, training_data):
         """Set training data for PCA-based weight initialization"""
         self.training_data = training_data
+    
+    def create_embedding_table(self, vocab_size, embedding_dim):
+        """Create and initialize embedding table on GPU"""
+        # Xavier initialization for embedding table
+        limit = math.sqrt(6.0 / (vocab_size + embedding_dim))
+        embedding_init = np.random.uniform(-limit, limit, (vocab_size, embedding_dim)).astype(np.float32)
+        
+        # Transfer to GPU
+        self.embedding_table = cuda.to_device(embedding_init)
+        self.use_embeddings = True
     
     def train_batch(self, batch_indices):
         """
@@ -332,25 +342,31 @@ class GPUTextAutoencoder:
             raise ValueError("Dataset not loaded. Call load_dataset() first.")
         
         # Get batch from GPU dataset
-        batch_gpu = cuda.device_array((len(batch_indices), self.dataset_gpu.shape[1]), dtype=np.float32)
-        for i, idx in enumerate(batch_indices):
-            batch_gpu[i] = self.dataset_gpu[idx]
+        if self.use_embeddings:
+            # Look up embeddings for token IDs
+            batch_token_ids = cuda.device_array((len(batch_indices),), dtype=np.int32)
+            for i, idx in enumerate(batch_indices):
+                batch_token_ids[i] = self.dataset_gpu[idx]
+            
+            # Convert token IDs to embeddings
+            batch_gpu = cuda.device_array((len(batch_indices), self.vector_length), dtype=np.float32)
+            launch_embedding_lookup(batch_token_ids, self.embedding_table, batch_gpu)
+            else:
+            # Direct vector input
+            batch_gpu = cuda.device_array((len(batch_indices), self.dataset_gpu.shape[1]), dtype=np.float32)
+            for i, idx in enumerate(batch_indices):
+                batch_gpu[i] = self.dataset_gpu[idx]
+        
         target_batch_gpu = batch_gpu  # Autoencoder targets = inputs
         
         # Forward and backward pass using internal hyperparameters
-        self.backward(batch_gpu, target_batch_gpu, self.learning_rate, self.grad_clip_norm)
+        self.backward(batch_gpu, target_batch_gpu, self.learning_rate, self.grad_clip_norm, batch_indices)
         
-        # Compute loss if needed (euclidean distance from home positions)
+        # Compute loss if needed (simple MSE reconstruction)
         final_output = self.forward(batch_gpu)
         loss_gpu = cuda.device_array((len(batch_indices),), dtype=np.float32)
-        # Get the corresponding training vectors for this batch
-        batch_training_vectors = cuda.device_array((len(batch_indices), self.vector_length), dtype=np.float32)
-        for i, batch_idx in enumerate(batch_indices):
-            batch_training_vectors[i] = self.dataset_gpu[batch_idx]
         
-        launch_combined_cosine_home_loss(final_output, target_batch_gpu, batch_training_vectors, loss_gpu,
-                                        getattr(self, 'position_weight', 1.0),
-                                        getattr(self, 'max_home_distance', 2.0))
+        launch_mse_loss(final_output, target_batch_gpu, loss_gpu)
         
         loss_cpu = loss_gpu.copy_to_host()
         return float(np.mean(loss_cpu))

@@ -30,24 +30,19 @@ def load_data(vector_length, vector_method="random"):
     training_data = []
     
     if vector_method == "tokenized":
-        # Use tokenizer to create sparse vectors (the "bug" for research)
+        # Use tokenizer to create token IDs (simple approach)
         tokenizer = Tokenizer(vocab_size=len(color_names))
         tokenizer.fill_dictionary(color_names)
         
         for name in color_names:
             tokens = tokenizer.tokenize(name)
-            encoded = np.zeros(vector_length, dtype=np.float32)
+            # For simplicity, use first token as the ID (or average multiple tokens)
+            if tokens:
+                token_id = tokens[0]  # Use first token
+            else:
+                token_id = 0  # Default token
             
-            # Spread each token value across the vector with a sine wave pattern
-            for token in tokens:
-                token_value = float(token)
-                # Create a sine wave pattern based on the token value
-                for i in range(vector_length):
-                    # Sine wave with frequency based on token value
-                    wave_value = token_value * np.sin(2 * np.pi * i * token_value / vector_length)
-                    encoded[i] += wave_value
-            
-            training_data.append((encoded, name))
+            training_data.append((token_id, name))
     else:
         # Create random vectors for each color name (like CPU version)
         for name in color_names:
@@ -59,6 +54,19 @@ def load_data(vector_length, vector_method="random"):
 
 def save_model(gpu_ae, training_data_array, training_data, best_loss, best_loss_epoch, final_loss, total_epochs, params, vector_method, start_time, epoch, is_best=False):
     print("Saving real model outputs for analysis...")
+    
+    if vector_method == "tokenized":
+        # For tokenized approach, we need to get embeddings first
+        token_ids = np.array([item[0] for item in training_data], dtype=np.int32)
+        if gpu_ae.embedding_table is not None:
+            embeddings = cuda.device_array((len(token_ids), gpu_ae.vector_length), dtype=np.float32)
+            from kernels.embedding_kernels import launch_embedding_lookup
+            launch_embedding_lookup(cuda.to_device(token_ids), gpu_ae.embedding_table, embeddings)
+            training_data_array = embeddings.copy_to_host()
+        else:
+            # Fallback to random data
+            training_data_array = np.random.rand(len(token_ids), gpu_ae.vector_length).astype(np.float32)
+    
     real_model_outputs = gpu_ae.infer(training_data_array)
     
     os.makedirs("/models", exist_ok=True)
@@ -105,14 +113,11 @@ if __name__ == "__main__":
                         help="Learning rate")
     parser.add_argument("--batch-size", type=int, default=4, 
                         help="Batch size for training")
-    parser.add_argument("--max-home-distance", type=float, default=2.0, 
-                        help="Maximum allowed distance from home position")
-    parser.add_argument("--position-weight", type=float, default=1.0, 
-                        help="Weight for home position penalty")
+
     
     args = parser.parse_args()
     
-    def smoke_test_with_args(vector_method, bottleneck_size, vector_length, epochs, learning_rate, batch_size, max_home_distance, position_weight):
+    def smoke_test_with_args(vector_method, bottleneck_size, vector_length, epochs, learning_rate, batch_size):
         
         params = {
             'vector_length': vector_length,
@@ -123,13 +128,11 @@ if __name__ == "__main__":
             'batch_size': batch_size,
             'grad_clip_norm': 1,
             "epochs": epochs,
-            'max_home_distance': max_home_distance,
-            'position_weight': position_weight,
         }
         
         print(f"Compression ratio: {params['vector_length'] / params['bottleneck_size']:.2f}x")
         print(f"Hidden layers: {params['hidden_layer_count']} (gradual geometric stepdown)")
-        print(f"Home position: max_distance={max_home_distance}, weight={position_weight}")
+        print(f"Loss function: Simple MSE reconstruction")
         
         gpu_ae = GPUTextAutoencoder(
             vector_length=params['vector_length'],
@@ -140,8 +143,7 @@ if __name__ == "__main__":
             
         print(f"Layer architecture: {' → '.join(map(str, gpu_ae.layer_sizes))}")
             
-        # Set home position parameters
-        gpu_ae.set_home_position_params(max_home_distance, position_weight)
+
         
         # Load data
         training_data = load_data(vector_length, vector_method)
@@ -150,14 +152,29 @@ if __name__ == "__main__":
         print(f"Model: {vector_length}→{bottleneck_size}→{vector_length}")
         
         # GPU Memory allocation
-        training_data_array = np.array([item[0] for item in training_data], dtype=np.float32)
-        
-        # Set training data for PCA initialization (before weight initialization)
-        gpu_ae.set_training_data_for_pca(training_data_array)
-        print("Using PCA-based weight initialization")
-        
-        # Transfer training data to GPU
-        gpu_ae.dataset_gpu = cuda.to_device(training_data_array)
+        if vector_method == "tokenized":
+            # Token IDs for embedding lookup
+            token_ids = np.array([item[0] for item in training_data], dtype=np.int32)
+            vocab_size = len(training_data)
+            
+            # Create and initialize embedding table
+            gpu_ae.create_embedding_table(vocab_size, vector_length)
+            print("Using learnable embedding table")
+            
+            # Store token IDs instead of vectors
+            gpu_ae.dataset_gpu = cuda.to_device(token_ids)
+            gpu_ae.use_embeddings = True
+                else:
+            # Random vectors
+            training_data_array = np.array([item[0] for item in training_data], dtype=np.float32)
+            
+            # Set training data for PCA initialization (before weight initialization)
+            gpu_ae.set_training_data_for_pca(training_data_array)
+            print("Using PCA-based weight initialization")
+            
+            # Transfer training data to GPU
+            gpu_ae.dataset_gpu = cuda.to_device(training_data_array)
+            gpu_ae.use_embeddings = False
         
         # Set training parameters
         gpu_ae.set_learning_rate(params['learning_rate'])
@@ -185,10 +202,12 @@ if __name__ == "__main__":
               print(f"Epoch {epoch}: Loss = {loss:.6f}")
 
             if epoch % 10000 == 0 or epoch == 0 or epoch == total_epochs - 1:
-                save_model(gpu_ae, training_data_array, training_data, best_loss, best_loss_epoch, final_loss, total_epochs, params, vector_method, start_time, epoch)
+                # Pass the appropriate training data array
+                data_array = training_data_array if vector_method != "tokenized" else None
+                save_model(gpu_ae, data_array, training_data, best_loss, best_loss_epoch, final_loss, total_epochs, params, vector_method, start_time, epoch)
         
         gpu_ae.cleanup_gpu_memory()
         
         return best_loss < 0.01
     
-    smoke_test_with_args(args.vector_method, args.bottleneck_size, args.vector_length, args.epochs, args.learning_rate, args.batch_size, args.max_home_distance, args.position_weight) 
+    smoke_test_with_args(args.vector_method, args.bottleneck_size, args.vector_length, args.epochs, args.learning_rate, args.batch_size) 
